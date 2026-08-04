@@ -1,3 +1,5 @@
+import re
+
 from playwright.sync_api import Locator, Page
 
 
@@ -7,6 +9,34 @@ def normalize_text(value: str | None) -> str:
 
     return " ".join(
         value.casefold().split()
+    )
+
+
+def normalize_option_text(value: str | None) -> str:
+    """
+    Aggressively normalize dropdown text so that:
+
+    Button Down Shirts
+    Button-Down Shirts
+    Button Down  Shirts
+
+    all become:
+
+    buttondownshirts
+
+    Likewise:
+
+    Loafers & Slip-Ons
+    Loafers Slip Ons
+
+    both become:
+
+    loafersslipons
+    """
+    return re.sub(
+        r"[^a-z0-9]+",
+        "",
+        normalize_text(value),
     )
 
 
@@ -37,11 +67,8 @@ def click_locator(
     locator.scroll_into_view_if_needed()
 
     try:
-        locator.click(
-            timeout=timeout,
-        )
+        locator.click(timeout=timeout)
         return
-
     except Exception:
         pass
 
@@ -51,7 +78,6 @@ def click_locator(
             force=True,
         )
         return
-
     except Exception:
         pass
 
@@ -75,21 +101,10 @@ def find_visible_exact_text(
     page: Page,
     option_text: str,
 ) -> Locator | None:
-    target = normalize_text(
+
+    target = normalize_option_text(
         option_text
     )
-
-    exact_matches = page.get_by_text(
-        option_text,
-        exact=True,
-    )
-
-    exact_match = first_visible(
-        exact_matches
-    )
-
-    if exact_match is not None:
-        return exact_match
 
     selectors = [
         ".dropdown__menu--expanded a",
@@ -104,31 +119,37 @@ def find_visible_exact_text(
         "p",
     ]
 
-    for selector in selectors:
-        candidates = page.locator(
-            selector
-        )
+    available = []
 
-        for index in range(
-            candidates.count()
-        ):
-            candidate = candidates.nth(
-                index
-            )
+    for selector in selectors:
+        candidates = page.locator(selector)
+
+        for index in range(candidates.count()):
+            candidate = candidates.nth(index)
 
             try:
                 if not candidate.is_visible():
                     continue
 
-                text = normalize_text(
-                    candidate.inner_text()
-                )
+                raw_text = candidate.inner_text().strip()
 
-                if text == target:
+                if not raw_text:
+                    continue
+
+                available.append(raw_text)
+
+                if (
+                    normalize_option_text(raw_text)
+                    == target
+                ):
                     return candidate
 
             except Exception:
                 continue
+
+    print("\nAvailable options:")
+    for option in sorted(set(available)):
+        print(" -", option)
 
     return None
 
@@ -138,6 +159,7 @@ def wait_for_visible_exact_text(
     option_text: str,
     timeout_ms: int = 5000,
 ) -> Locator | None:
+
     elapsed = 0
     interval = 250
 
@@ -150,10 +172,7 @@ def wait_for_visible_exact_text(
         if option is not None:
             return option
 
-        page.wait_for_timeout(
-            interval
-        )
-
+        page.wait_for_timeout(interval)
         elapsed += interval
 
     return None
@@ -164,14 +183,11 @@ def open_control(
     control: Locator,
     expected_option: str | None = None,
 ) -> None:
-    click_locator(
-        control
-    )
+
+    click_locator(control)
 
     if expected_option is None:
-        page.wait_for_timeout(
-            800
-        )
+        page.wait_for_timeout(800)
         return
 
     option = wait_for_visible_exact_text(
@@ -185,9 +201,7 @@ def open_control(
 
     try:
         control.focus()
-        page.keyboard.press(
-            "Enter"
-        )
+        page.keyboard.press("Enter")
     except Exception:
         pass
 
@@ -216,8 +230,7 @@ def open_control(
 
     if option is None:
         raise RuntimeError(
-            "The control did not open an option "
-            f"named: {expected_option}"
+            f"The control did not open an option named: {expected_option}"
         )
 
 
@@ -225,6 +238,7 @@ def select_visible_option(
     page: Page,
     option_text: str,
 ) -> None:
+
     option = wait_for_visible_exact_text(
         page,
         option_text,
@@ -233,17 +247,12 @@ def select_visible_option(
 
     if option is None:
         raise RuntimeError(
-            f"Could not find visible option: "
-            f"{option_text}"
+            f"Could not find visible option: {option_text}"
         )
 
-    click_locator(
-        option
-    )
+    click_locator(option)
 
-    page.wait_for_timeout(
-        800
-    )
+    page.wait_for_timeout(800)
 
 
 def open_and_select(
@@ -251,6 +260,7 @@ def open_and_select(
     control: Locator,
     option_text: str,
 ) -> None:
+
     open_control(
         page,
         control,

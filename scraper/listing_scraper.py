@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import Page
@@ -17,6 +19,14 @@ from scraper.parser import (
     extract_size,
 )
 from scraper.save_listing import save_listing
+
+
+JSONLD_CONDITION_MAP = {
+    "https://schema.org/newcondition": "New With Tags",
+    "https://schema.org/usedcondition": "Good",
+    "https://schema.org/refurbishedcondition": "Good",
+    "https://schema.org/damagedcondition": "Fair",
+}
 
 
 def clean_listing_url(
@@ -144,6 +154,181 @@ def extract_image_urls(
     ]
 
 
+def _walk_jsonld(
+    value: Any,
+) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+
+    if isinstance(value, dict):
+        objects.append(value)
+
+        graph = value.get("@graph")
+
+        if isinstance(graph, list):
+            for item in graph:
+                objects.extend(
+                    _walk_jsonld(item)
+                )
+
+    elif isinstance(value, list):
+        for item in value:
+            objects.extend(
+                _walk_jsonld(item)
+            )
+
+    return objects
+
+
+def extract_jsonld_products(
+    page: Page,
+) -> list[dict[str, Any]]:
+    try:
+        scripts = page.locator(
+            'script[type="application/ld+json"]'
+        ).all_text_contents()
+    except Exception:
+        return []
+
+    products: list[dict[str, Any]] = []
+
+    for raw_script in scripts:
+        try:
+            payload = json.loads(
+                raw_script
+            )
+        except (
+            TypeError,
+            json.JSONDecodeError,
+        ):
+            continue
+
+        for item in _walk_jsonld(
+            payload
+        ):
+            item_type = item.get(
+                "@type"
+            )
+
+            if (
+                item_type == "Product"
+                or (
+                    isinstance(
+                        item_type,
+                        list,
+                    )
+                    and "Product" in item_type
+                )
+            ):
+                products.append(
+                    item
+                )
+
+    return products
+
+
+def normalize_schema_url(
+    value: str | None,
+) -> str:
+    if not value:
+        return ""
+
+    return (
+        str(value)
+        .strip()
+        .rstrip("/")
+        .casefold()
+    )
+
+
+def extract_condition_from_jsonld(
+    page: Page,
+) -> str | None:
+    products = extract_jsonld_products(
+        page
+    )
+
+    for product in products:
+        offers = product.get(
+            "offers"
+        )
+
+        offer_items: list[
+            dict[str, Any]
+        ] = []
+
+        if isinstance(
+            offers,
+            dict,
+        ):
+            offer_items.append(
+                offers
+            )
+
+        elif isinstance(
+            offers,
+            list,
+        ):
+            offer_items.extend(
+                item
+                for item in offers
+                if isinstance(
+                    item,
+                    dict,
+                )
+            )
+
+        for offer in offer_items:
+            raw_condition = offer.get(
+                "itemCondition"
+            )
+
+            if isinstance(
+                raw_condition,
+                dict,
+            ):
+                raw_condition = (
+                    raw_condition.get("@id")
+                    or raw_condition.get("url")
+                    or raw_condition.get("name")
+                )
+
+            normalized = normalize_schema_url(
+                str(raw_condition)
+                if raw_condition
+                else ""
+            )
+
+            mapped = JSONLD_CONDITION_MAP.get(
+                normalized
+            )
+
+            if mapped:
+                return mapped
+
+        direct_condition = product.get(
+            "itemCondition"
+        )
+
+        normalized_direct = (
+            normalize_schema_url(
+                str(direct_condition)
+                if direct_condition
+                else ""
+            )
+        )
+
+        mapped_direct = (
+            JSONLD_CONDITION_MAP.get(
+                normalized_direct
+            )
+        )
+
+        if mapped_direct:
+            return mapped_direct
+
+    return None
+
+
 def scrape_listing(
     page: Page,
     listing_url: str,
@@ -194,6 +379,23 @@ def scrape_listing(
             page
         )
 
+    condition = extract_condition(
+        lines
+    )
+
+    if condition is None:
+        condition = (
+            extract_condition_from_jsonld(
+                page
+            )
+        )
+
+        if condition:
+            print(
+                "Condition recovered from JSON-LD:",
+                condition,
+            )
+
     listing = {
         "url": clean_listing_url(
             listing_url
@@ -211,9 +413,7 @@ def scrape_listing(
         "size": extract_size(
             lines
         ),
-        "condition": extract_condition(
-            lines
-        ),
+        "condition": condition,
         "category": extract_category(
             lines
         ),
