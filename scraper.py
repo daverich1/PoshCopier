@@ -8,12 +8,14 @@ from login import (
     SOURCE_STATE_FILE,
     open_logged_in_browser,
 )
+from scraper.discover import (
+    discover_closet_listings,
+    extract_listing_id,
+)
 from scraper.image_downloader import (
     download_listing_images,
 )
 from scraper.listing_scraper import (
-    extract_listing_id,
-    get_listing_links,
     scrape_listing,
 )
 
@@ -27,8 +29,8 @@ PROJECT_DIR = Path(__file__).resolve().parent
 DOWNLOADS_DIR = PROJECT_DIR / "downloads"
 LOGS_DIR = PROJECT_DIR / "logs"
 
-# None means scrape every remaining available listing.
-# Set this to 5 during testing.
+# Keep this at 5 while testing.
+# Change to None after confirming unavailable items are skipped.
 MAX_NEW_LISTINGS_PER_RUN = 5
 
 
@@ -116,7 +118,6 @@ def repair_missing_listing_id(
             "Could not repair listing file:",
             path,
         )
-
         print(
             "Reason:",
             error,
@@ -211,16 +212,16 @@ def append_log_record(
 
 
 def log_unavailable_card(
-    card: dict,
+    card,
 ) -> None:
     append_log_record(
         "unavailable_cards.txt",
         [
-            f"URL: {card.get('url')}",
-            f"STATUS: {card.get('status')}",
+            f"URL: {card.url}",
+            f"STATUS: {card.status}",
             (
                 "REASON: "
-                f"{card.get('unavailable_reason')}"
+                f"{card.unavailable_reason}"
             ),
         ],
     )
@@ -238,6 +239,10 @@ def log_unavailable_listing(
             (
                 "REASON: "
                 f"{listing.get('availability_reason')}"
+            ),
+            (
+                "SIGNAL: "
+                f"{listing.get('availability_signal')}"
             ),
         ],
     )
@@ -306,42 +311,40 @@ def print_listing_summary(
         "LISTING ID:",
         listing.get("listing_id"),
     )
-
     print(
         "TITLE:",
         listing.get("title"),
     )
-
     print(
         "PRICE:",
         listing.get("price"),
     )
-
     print(
         "BRAND:",
         listing.get("brand"),
     )
-
     print(
         "SIZE:",
         listing.get("size"),
     )
-
     print(
         "CONDITION:",
         listing.get("condition"),
     )
-
     print(
         "CATEGORY:",
         listing.get("category"),
     )
-
     print(
         "COLORS:",
         listing.get("colors"),
     )
-
+    print(
+        "AVAILABILITY REASON:",
+        listing.get(
+            "availability_reason"
+        ),
+    )
     print(
         "IMAGES FOUND:",
         len(
@@ -351,7 +354,6 @@ def print_listing_summary(
             )
         ),
     )
-
     print(
         "IMAGES DOWNLOADED:",
         len(
@@ -391,15 +393,14 @@ def main() -> None:
         failed = 0
 
         try:
-            (
-                listing_links,
-                unavailable_cards,
-            ) = get_listing_links(
-                page,
-                CLOSET_URL,
+            discovery = (
+                discover_closet_listings(
+                    page,
+                    CLOSET_URL,
+                )
             )
 
-            for card in unavailable_cards:
+            for card in discovery.unavailable_cards:
                 log_unavailable_card(
                     card
                 )
@@ -408,31 +409,34 @@ def main() -> None:
                 pending_links,
                 already_downloaded,
             ) = get_pending_listing_links(
-                listing_links
+                discovery.available_urls
             )
 
             print("\n" + "=" * 60)
-
             print(
-                "Available closet listings found:",
-                len(listing_links),
+                "Total closet cards:",
+                discovery.total_cards,
             )
-
+            print(
+                "Available closet listings:",
+                len(
+                    discovery.available_urls
+                ),
+            )
             print(
                 "Unavailable cards skipped:",
-                len(unavailable_cards),
+                len(
+                    discovery.unavailable_cards
+                ),
             )
-
             print(
                 "Already downloaded:",
                 already_downloaded,
             )
-
             print(
                 "Available listings this run:",
                 len(pending_links),
             )
-
             print("=" * 60)
 
             if not pending_links:
@@ -474,15 +478,19 @@ def main() -> None:
                             "Skipping listing after "
                             "page-level availability check:"
                         )
-
                         print(
                             listing.get("title")
                         )
-
                         print(
                             "Reason:",
                             listing.get(
                                 "availability_reason"
+                            ),
+                        )
+                        print(
+                            "Signal:",
+                            listing.get(
+                                "availability_signal"
                             ),
                         )
 
@@ -524,11 +532,9 @@ def main() -> None:
                     print(
                         "\nCould not scrape listing:"
                     )
-
                     print(
                         listing_url
                     )
-
                     print(
                         "Reason:",
                         error,
@@ -544,43 +550,40 @@ def main() -> None:
                 )
 
             print("\n" + "=" * 60)
-
-            print(
-                "SCRAPER COMPLETE"
-            )
-
+            print("SCRAPER COMPLETE")
             print("=" * 60)
-
+            print(
+                "Total closet cards:",
+                discovery.total_cards,
+            )
             print(
                 "Available discovered:",
-                len(listing_links),
+                len(
+                    discovery.available_urls
+                ),
             )
-
             print(
                 "Unavailable cards skipped:",
-                len(unavailable_cards),
+                len(
+                    discovery.unavailable_cards
+                ),
             )
-
             print(
                 "Previously downloaded:",
                 already_downloaded,
             )
-
             print(
                 "Downloaded this run:",
                 downloaded,
             )
-
             print(
                 "Skipped after page check:",
                 unavailable_on_page,
             )
-
             print(
                 "Failed this run:",
                 failed,
             )
-
             print("=" * 60)
 
             input(
