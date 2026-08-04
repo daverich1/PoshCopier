@@ -14,6 +14,7 @@ class AvailabilityStatus(str, Enum):
     SOLD = "sold"
     SOLD_OUT = "sold_out"
     NOT_FOR_SALE = "not_for_sale"
+    INACTIVE = "inactive"
     UNAVAILABLE = "unavailable"
     UNKNOWN = "unknown"
 
@@ -34,6 +35,9 @@ EXACT_STATUS_MAP: dict[str, AvailabilityStatus] = {
     "unavailable": AvailabilityStatus.UNAVAILABLE,
     "listing unavailable": AvailabilityStatus.UNAVAILABLE,
     "this listing is no longer available": AvailabilityStatus.UNAVAILABLE,
+    "inactive": AvailabilityStatus.INACTIVE,
+    "listing inactive": AvailabilityStatus.INACTIVE,
+    "this listing is inactive": AvailabilityStatus.INACTIVE,
 }
 
 

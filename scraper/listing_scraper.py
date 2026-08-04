@@ -1,10 +1,11 @@
+from __future__ import annotations
+
 from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import Page
 
-from scraper.availability import (
-    check_listing_availability,
-)
+from scraper.availability import verify_listing_availability
+from scraper.image_downloader import download_listing_images
 from scraper.parser import (
     clean_lines,
     extract_brand,
@@ -15,6 +16,7 @@ from scraper.parser import (
     extract_price,
     extract_size,
 )
+from scraper.save_listing import save_listing
 
 
 def clean_listing_url(
@@ -73,7 +75,7 @@ def get_text(
 def extract_image_urls(
     page: Page,
 ) -> list[str]:
-    return page.locator(
+    result = page.locator(
         "img"
     ).evaluate_all(
         r"""
@@ -132,6 +134,15 @@ def extract_image_urls(
         """
     )
 
+    if not isinstance(result, list):
+        return []
+
+    return [
+        str(url)
+        for url in result
+        if isinstance(url, str)
+    ]
+
 
 def scrape_listing(
     page: Page,
@@ -140,6 +151,7 @@ def scrape_listing(
     page.goto(
         listing_url,
         wait_until="domcontentloaded",
+        timeout=60_000,
     )
 
     page.wait_for_timeout(
@@ -147,7 +159,7 @@ def scrape_listing(
     )
 
     availability = (
-        check_listing_availability(
+        verify_listing_availability(
             page
         )
     )
@@ -171,20 +183,22 @@ def scrape_listing(
         body_text
     )
 
-    image_urls = []
+    listing_id = extract_listing_id(
+        listing_url
+    )
+
+    image_urls: list[str] = []
 
     if availability.available:
         image_urls = extract_image_urls(
             page
         )
 
-    return {
+    listing = {
         "url": clean_listing_url(
             listing_url
         ),
-        "listing_id": extract_listing_id(
-            listing_url
-        ),
+        "listing_id": listing_id,
         "title": title,
         "price": extract_price(
             lines,
@@ -210,9 +224,35 @@ def scrape_listing(
             lines
         ),
         "image_urls": image_urls,
+        "local_images": [],
         "available": availability.available,
         "availability_reason": availability.reason,
         "availability_signal": (
-            availability.matched_signal
+            availability.matched_text
         ),
     }
+
+    if not availability.available:
+        return listing
+
+    local_images = download_listing_images(
+        listing
+    )
+
+    listing["local_images"] = local_images
+
+    if not local_images:
+        raise RuntimeError(
+            "The listing was available, but no images "
+            "were downloaded."
+        )
+
+    saved_path = save_listing(
+        listing
+    )
+
+    listing["listing_json"] = str(
+        saved_path
+    )
+
+    return listing

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -12,10 +14,8 @@ from playwright.sync_api import Page, sync_playwright
 
 try:
     from .availability import classify_card_status
-    from .save_listing import listing_id_from_url
 except ImportError:
     from availability import classify_card_status
-    from save_listing import listing_id_from_url
 
 
 @dataclass(slots=True)
@@ -36,274 +36,263 @@ def canonicalize_listing_url(
     absolute = urljoin(base_url, url)
     parsed = urlsplit(absolute)
 
-    clean_path = parsed.path.rstrip("/")
-
     return urlunsplit(
         (
             parsed.scheme or "https",
             parsed.netloc or "poshmark.com",
-            clean_path,
+            parsed.path.rstrip("/"),
             "",
             "",
         )
     )
 
 
+def listing_id_from_url(url: str) -> str:
+    path = urlsplit(url).path.rstrip("/")
+    slug = path.rsplit("/", 1)[-1]
+
+    match = re.search(r"(?:-|^)([a-fA-F0-9]{24})$", slug)
+
+    if match:
+        return match.group(1).lower()
+
+    return hashlib.sha1(url.encode("utf-8")).hexdigest()[:24]
+
+
 def _extract_cards_from_page(page: Page) -> list[dict[str, Any]]:
-    """
-    Extract individual listing cards from the currently loaded closet page.
+    script = r"""
+    () => {
+        const normalizeHref = (href) => {
+            try {
+                const url = new URL(href, window.location.origin);
+                url.hash = "";
+                url.search = "";
+                return url.toString().replace(/\/$/, "");
+            } catch {
+                return "";
+            }
+        };
 
-    For each listing link, JavaScript walks upward only a limited number of
-    levels and selects the smallest visible ancestor containing exactly one
-    unique listing URL.
-    """
-    return page.evaluate(
-        """
-        () => {
-            const normalizeHref = (href) => {
-                try {
-                    const url = new URL(href, window.location.origin);
-                    url.hash = "";
-                    url.search = "";
+        const uniqueListingUrls = (node) => {
+            const urls = new Set();
 
-                    return url.toString().replace(/\\/$/, "");
-                } catch {
-                    return "";
+            if (node.matches && node.matches('a[href*="/listing/"]')) {
+                const ownHref = normalizeHref(node.href);
+                if (ownHref) {
+                    urls.add(ownHref);
                 }
-            };
+            }
 
-            const uniqueListingUrls = (node) => {
-                const urls = new Set();
-
-                if (
-                    node.matches &&
-                    node.matches('a[href*="/listing/"]')
-                ) {
-                    const ownHref = normalizeHref(node.href);
-
-                    if (ownHref) {
-                        urls.add(ownHref);
-                    }
+            for (const anchor of node.querySelectorAll('a[href*="/listing/"]')) {
+                const href = normalizeHref(anchor.href);
+                if (href) {
+                    urls.add(href);
                 }
+            }
 
-                const anchors = node.querySelectorAll(
-                    'a[href*="/listing/"]'
-                );
+            return urls;
+        };
 
-                for (const anchor of anchors) {
-                    const href = normalizeHref(anchor.href);
+        const statusSelectors = [
+    '[data-et-name*="sold" i]',
+    '[data-et-name*="availability" i]',
+    '[data-et-name*="inactive" i]',
+    '[data-test*="sold" i]',
+    '[data-test*="availability" i]',
+    '[data-test*="inactive" i]',
+    '[class*="sold-out" i]',
+    '[class*="sold_out" i]',
+    '[class~="sold"]',
+    '[class*="not-for-sale" i]',
+    '[class*="not_for_sale" i]',
+    '[class*="inactive" i]',
+    '[class*="listing-status" i]',
+    '[class*="listing_status" i]',
+    '[class*="inventory-tag" i]',
+    '[class*="inventory_tag" i]',
+    '[class*="availability" i]',
+    '[aria-label="Sold" i]',
+    '[aria-label="Sold Out" i]',
+    '[aria-label="Not For Sale" i]',
+    '[aria-label="Inactive" i]'
+];
 
-                    if (href) {
-                        urls.add(href);
-                    }
-                }
+        const getStatusLabels = (card) => {
+            const labels = [];
+            const seen = new Set();
 
-                return urls;
-            };
+            for (const selector of statusSelectors) {
+                for (const node of card.querySelectorAll(selector)) {
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
 
-            const statusSelectors = [
-                '[data-et-name*="sold" i]',
-                '[data-et-name*="availability" i]',
-                '[data-test*="sold" i]',
-                '[data-test*="availability" i]',
-                '[class*="sold-out" i]',
-                '[class*="sold_out" i]',
-                '[class~="sold"]',
-                '[class*="not-for-sale" i]',
-                '[class*="not_for_sale" i]',
-                '[class*="listing-status" i]',
-                '[class*="listing_status" i]',
-                '[class*="inventory-tag" i]',
-                '[class*="inventory_tag" i]',
-                '[class*="availability" i]',
-                '[aria-label="Sold" i]',
-                '[aria-label="Sold Out" i]',
-                '[aria-label="Not For Sale" i]'
-            ];
+                    const visible =
+                        rect.width > 0 &&
+                        rect.height > 0 &&
+                        style.display !== "none" &&
+                        style.visibility !== "hidden";
 
-            const getStatusLabels = (card) => {
-                const labels = [];
-                const seen = new Set();
-
-                for (const selector of statusSelectors) {
-                    const nodes = card.querySelectorAll(selector);
-
-                    for (const node of nodes) {
-                        const rect = node.getBoundingClientRect();
-                        const style = window.getComputedStyle(node);
-
-                        const visible =
-                            rect.width > 0 &&
-                            rect.height > 0 &&
-                            style.display !== "none" &&
-                            style.visibility !== "hidden";
-
-                        if (!visible) {
-                            continue;
-                        }
-
-                        const text = (
-                            node.innerText ||
-                            node.textContent ||
-                            ""
-                        )
-                            .replace(/\\s+/g, " ")
-                            .trim();
-
-                        const normalized = text.toLowerCase();
-
-                        if (text && !seen.has(normalized)) {
-                            labels.push(text);
-                            seen.add(normalized);
-                        }
-                    }
-                }
-
-                return labels;
-            };
-
-                        const chooseCard = (anchor, listingUrl) => {
-                let node = anchor;
-                let best = null;
-
-                for (let depth = 0; depth <= 8 && node; depth += 1) {
-                    if (
-                        node === document.body ||
-                        node === document.documentElement
-                    ) {
-                        break;
+                    if (!visible) {
+                        continue;
                     }
 
-                    const urls = uniqueListingUrls(node);
-                    const text = (node.innerText || "")
+                    const text = (node.innerText || node.textContent || "")
                         .replace(/\s+/g, " ")
                         .trim();
 
-                    const rect = node.getBoundingClientRect();
-                    const area =
-                        Math.max(rect.width, 1) *
-                        Math.max(rect.height, 1);
+                    const normalized = text.toLowerCase();
 
-                    const containsTarget = urls.has(listingUrl);
-                    const exactlyOneListing = urls.size === 1;
-                    const reasonableText = text.length <= 1800;
-                    const visibleSize =
-                        rect.width >= 80 &&
-                        rect.height >= 80;
-
-                    if (
-                        containsTarget &&
-                        exactlyOneListing &&
-                        reasonableText &&
-                        visibleSize
-                    ) {
-                        const candidate = {
-                            node,
-                            depth,
-                            area
-                        };
-
-                        if (
-                            !best ||
-                            candidate.area < best.area ||
-                            (
-                                candidate.area === best.area &&
-                                candidate.depth > best.depth
-                            )
-                        ) {
-                            best = candidate;
-                        }
+                    if (text && !seen.has(normalized)) {
+                        labels.push(text);
+                        seen.add(normalized);
                     }
-
-                    node = node.parentElement;
                 }
-
-                return (
-                    best?.node ||
-                    anchor.closest(
-                        "article, li, [role='listitem']"
-                    ) ||
-                    anchor.parentElement ||
-                    anchor
-                );
-            };
-
-            const anchors = Array.from(
-                document.querySelectorAll(
-                    'a[href*="/listing/"]'
-                )
-            );
-
-            const results = [];
-            const seenUrls = new Set();
-
-            for (const anchor of anchors) {
-                const rawHref =
-                    anchor.href ||
-                    anchor.getAttribute("href");
-
-                if (!rawHref) {
-                    continue;
-                }
-
-                const url = normalizeHref(rawHref);
-
-                if (
-                    !url ||
-                    !/\/listing\//i.test(url) ||
-                    seenUrls.has(url)
-                ) {
-                    continue;
-                }
-
-                const card = chooseCard(anchor, url);
-
-                const cardText = (
-                    card.innerText ||
-                    card.textContent ||
-                    ""
-                )
-                    .replace(/\u00a0/g, " ")
-                    .replace(/[ \t]+/g, " ")
-                    .replace(/\n{3,}/g, "\n\n")
-                    .trim();
-
-                const statusLabels = getStatusLabels(card);
-
-                const image = card.querySelector("img");
-
-                const titleCandidates = [
-                    anchor.getAttribute("aria-label"),
-                    anchor.getAttribute("title"),
-                    image?.getAttribute("alt"),
-                    card.querySelector(
-                        '[data-et-name*="title" i], ' +
-                        '[class*="title" i]'
-                    )?.textContent
-                ];
-
-                const title = titleCandidates
-                    .map(
-                        value => (value || "")
-                            .replace(/\s+/g, " ")
-                            .trim()
-                    )
-                    .find(Boolean) || "";
-
-                results.push({
-                    url,
-                    title,
-                    cardText,
-                    statusLabels
-                });
-
-                seenUrls.add(url);
             }
 
-            return results;
+            return labels;
+        };
+
+        const chooseCard = (anchor, listingUrl) => {
+            let node = anchor;
+            let best = null;
+
+            for (let depth = 0; depth <= 8 && node; depth += 1) {
+                if (
+                    node === document.body ||
+                    node === document.documentElement
+                ) {
+                    break;
+                }
+
+                const urls = uniqueListingUrls(node);
+                const text = (node.innerText || "")
+                    .replace(/\s+/g, " ")
+                    .trim();
+
+                const rect = node.getBoundingClientRect();
+                const area =
+                    Math.max(rect.width, 1) *
+                    Math.max(rect.height, 1);
+
+                const valid =
+                    urls.has(listingUrl) &&
+                    urls.size === 1 &&
+                    text.length <= 1800 &&
+                    rect.width >= 80 &&
+                    rect.height >= 80;
+
+                if (valid) {
+                    const candidate = {
+                        node,
+                        depth,
+                        area
+                    };
+
+                    if (
+                        !best ||
+                        candidate.area < best.area ||
+                        (
+                            candidate.area === best.area &&
+                            candidate.depth > best.depth
+                        )
+                    ) {
+                        best = candidate;
+                    }
+                }
+
+                node = node.parentElement;
+            }
+
+            return (
+                best?.node ||
+                anchor.closest("article, li, [role='listitem']") ||
+                anchor.parentElement ||
+                anchor
+            );
+        };
+
+        const anchors = Array.from(
+            document.querySelectorAll('a[href*="/listing/"]')
+        );
+
+        const results = [];
+        const seenUrls = new Set();
+
+        for (const anchor of anchors) {
+            const rawHref =
+                anchor.href ||
+                anchor.getAttribute("href");
+
+            if (!rawHref) {
+                continue;
+            }
+
+            const url = normalizeHref(rawHref);
+
+            if (
+                !url ||
+                !/\/listing\//i.test(url) ||
+                seenUrls.has(url)
+            ) {
+                continue;
+            }
+
+            const card = chooseCard(anchor, url);
+
+            const cardText = (
+                card.innerText ||
+                card.textContent ||
+                ""
+            )
+                .replace(/\u00a0/g, " ")
+                .replace(/[ \t]+/g, " ")
+                .replace(/\n{3,}/g, "\n\n")
+                .trim();
+
+            const image = card.querySelector("img");
+
+            const titleCandidates = [
+                anchor.getAttribute("aria-label"),
+                anchor.getAttribute("title"),
+                image?.getAttribute("alt"),
+                card.querySelector(
+                    '[data-et-name*="title" i], [class*="title" i]'
+                )?.textContent
+            ];
+
+            const title = titleCandidates
+                .map(
+                    value => (value || "")
+                        .replace(/\s+/g, " ")
+                        .trim()
+                )
+                .find(Boolean) || "";
+
+            results.push({
+                url,
+                title,
+                cardText,
+                statusLabels: getStatusLabels(card)
+            });
+
+            seenUrls.add(url);
         }
-        """
-    )
+
+        return results;
+    }
+    """
+
+    result = page.evaluate(script)
+
+    if not isinstance(result, list):
+        return []
+
+    return [
+        item
+        for item in result
+        if isinstance(item, dict)
+    ]
+
 
 def _merge_discovery(
     discovered: dict[str, DiscoveredListing],
@@ -323,11 +312,12 @@ def _merge_discovery(
         listing_id = listing_id_from_url(url)
         card_text = str(raw.get("cardText", "") or "")
 
-        status_labels = [
-            str(value)
-            for value in raw.get("statusLabels", [])
-            if isinstance(value, str)
-        ]
+        raw_labels = raw.get("statusLabels", [])
+        status_labels = (
+            [str(value) for value in raw_labels if isinstance(value, str)]
+            if isinstance(raw_labels, list)
+            else []
+        )
 
         availability = classify_card_status(
             card_text,
@@ -340,7 +330,7 @@ def _merge_discovery(
             title=str(raw.get("title", "") or "").strip(),
             card_status=availability.status.value,
             available=availability.available,
-            card_text=card_text[:2_000],
+            card_text=card_text[:2000],
             matched_status_text=availability.matched_text[:500],
         )
 
@@ -361,8 +351,6 @@ def _merge_discovery(
             existing.card_text = item.card_text
             changed = True
 
-        # Unavailable always wins if the same listing receives
-        # conflicting observations during scrolling.
         if existing.available and not item.available:
             existing.available = False
             existing.card_status = item.card_status
@@ -381,7 +369,7 @@ def discover_closet(
     *,
     max_scrolls: int = 600,
     stable_rounds_required: int = 8,
-    scroll_pause_ms: int = 1_200,
+    scroll_pause_ms: int = 1200,
     progress_path: Path | None = None,
 ) -> list[DiscoveredListing]:
     print(f"Opening source closet: {closet_url}")
@@ -391,8 +379,7 @@ def discover_closet(
         wait_until="domcontentloaded",
         timeout=60_000,
     )
-
-    page.wait_for_timeout(3_000)
+    page.wait_for_timeout(3000)
 
     discovered: dict[str, DiscoveredListing] = {}
     stable_rounds = 0
@@ -427,7 +414,6 @@ def discover_closet(
             item.available
             for item in discovered.values()
         )
-
         unavailable_count = (
             current_count - available_count
         )
@@ -441,25 +427,19 @@ def discover_closet(
             flush=True,
         )
 
-        if progress_path:
+        if progress_path is not None:
             save_discovery_results(
                 list(discovered.values()),
                 progress_path,
             )
 
-        count_unchanged = (
+        unchanged = (
             current_count == previous_count
-        )
-
-        height_unchanged = (
-            current_height == previous_height
-        )
-
-        if (
-            count_unchanged
-            and height_unchanged
+            and current_height == previous_height
             and new_count == 0
-        ):
+        )
+
+        if unchanged:
             stable_rounds += 1
         else:
             stable_rounds = 0
@@ -472,22 +452,16 @@ def discover_closet(
 
         page.evaluate(
             """
-            () => {
-                window.scrollTo({
-                    top: document.documentElement.scrollHeight,
-                    behavior: "instant"
-                });
-            }
+            () => window.scrollTo(
+                0,
+                document.documentElement.scrollHeight
+            )
             """
         )
-
         page.wait_for_timeout(scroll_pause_ms)
 
         if scroll_number % 5 == 0:
-            page.evaluate(
-                "() => window.scrollBy(0, -500)"
-            )
-
+            page.evaluate("() => window.scrollBy(0, -500)")
             page.wait_for_timeout(250)
 
             page.evaluate(
@@ -498,10 +472,9 @@ def discover_closet(
                 )
                 """
             )
-
             page.wait_for_timeout(500)
 
-                print()
+    print()
 
     results = sorted(
         discovered.values(),
@@ -512,7 +485,6 @@ def discover_closet(
         item.available
         for item in results
     )
-
     inactive_count = len(results) - active_count
 
     print(f"Discovery complete: {len(results)} total")
@@ -568,32 +540,39 @@ def save_discovery_results(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=(
-            "Discover Poshmark closet listings."
-        )
+        description="Discover Poshmark closet listings."
     )
 
     parser.add_argument(
         "--closet-url",
         required=True,
     )
-
     parser.add_argument(
         "--state",
-        default="state.json",
+        default="source_state.json",
     )
-
     parser.add_argument(
         "--output",
-        default=(
-            "downloads/"
-            "discovered_listings.json"
-        ),
+        default="downloads/discovered_listings.json",
     )
-
     parser.add_argument(
         "--headless",
         action="store_true",
+    )
+    parser.add_argument(
+        "--max-scrolls",
+        type=int,
+        default=600,
+    )
+    parser.add_argument(
+        "--stable-rounds",
+        type=int,
+        default=8,
+    )
+    parser.add_argument(
+        "--scroll-pause",
+        type=int,
+        default=1200,
     )
 
     args = parser.parse_args()
@@ -623,19 +602,23 @@ def main() -> None:
 
         page = context.new_page()
 
-        listings = discover_closet(
-            page,
-            args.closet_url,
-            progress_path=output_path,
-        )
+        try:
+            listings = discover_closet(
+                page,
+                args.closet_url,
+                max_scrolls=args.max_scrolls,
+                stable_rounds_required=args.stable_rounds,
+                scroll_pause_ms=args.scroll_pause,
+                progress_path=output_path,
+            )
 
-        save_discovery_results(
-            listings,
-            output_path,
-        )
-
-        context.close()
-        browser.close()
+            save_discovery_results(
+                listings,
+                output_path,
+            )
+        finally:
+            context.close()
+            browser.close()
 
 
 if __name__ == "__main__":
