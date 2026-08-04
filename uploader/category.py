@@ -1,0 +1,327 @@
+from playwright.sync_api import Locator, Page
+
+from uploader.dropdowns import (
+    normalize_text,
+    open_and_select,
+    select_visible_option,
+)
+
+
+DEPARTMENTS = (
+    "Women",
+    "Men",
+    "Kids",
+    "Home",
+    "Pets",
+    "Electronics",
+)
+
+
+KNOWN_CATEGORIES = (
+    "Intimates & Sleepwear",
+    "Pants & Jumpsuits",
+    "Jackets & Coats",
+    "Accessories",
+    "Sweaters",
+    "Dresses",
+    "Makeup",
+    "Shorts",
+    "Skirts",
+    "Sleepwear",
+    "Jeans",
+    "Shoes",
+    "Bags",
+    "Swim",
+    "Tops",
+)
+
+
+KNOWN_SUBCATEGORIES = (
+    "Cardigans",
+    "Cowl & Turtlenecks",
+    "Crew & Scoop Necks",
+    "Off-the-Shoulder Sweaters",
+    "Shrugs & Ponchos",
+    "V-Necks",
+    "Sneakers",
+    "Boots",
+    "Sandals",
+    "Heels",
+    "Flats & Loafers",
+)
+
+
+def compact_text(
+    value: str | None,
+) -> str:
+    return (
+        normalize_text(value)
+        .replace(" ", "")
+        .replace("&", "")
+        .replace("-", "")
+    )
+
+
+def match_known_value(
+    remaining_text: str,
+    known_values: tuple[str, ...],
+) -> tuple[str | None, str]:
+    sorted_values = sorted(
+        known_values,
+        key=lambda value: len(
+            compact_text(value)
+        ),
+        reverse=True,
+    )
+
+    for value in sorted_values:
+        compact_value = compact_text(
+            value
+        )
+
+        if remaining_text.startswith(
+            compact_value
+        ):
+            leftover = remaining_text[
+                len(compact_value):
+            ]
+
+            return value, leftover
+
+    return None, remaining_text
+
+
+def split_category(
+    category_text: str,
+) -> tuple[
+    str,
+    str | None,
+    str | None,
+]:
+    if not category_text:
+        raise RuntimeError(
+            "The listing category is missing."
+        )
+
+    cleaned = category_text.strip()
+
+    department = None
+    remaining = ""
+
+    for candidate in DEPARTMENTS:
+        if cleaned.casefold().startswith(
+            candidate.casefold()
+        ):
+            department = candidate
+            remaining = cleaned[
+                len(candidate):
+            ]
+            break
+
+    if department is None:
+        raise RuntimeError(
+            "Could not determine the department "
+            f"from category: {category_text}"
+        )
+
+    if not remaining:
+        return department, None, None
+
+    compact_remaining = compact_text(
+        remaining
+    )
+
+    category, subcategory_text = (
+        match_known_value(
+            compact_remaining,
+            KNOWN_CATEGORIES,
+        )
+    )
+
+    if category is None:
+        return (
+            department,
+            remaining,
+            None,
+        )
+
+    subcategory = None
+
+    if subcategory_text:
+        matched_subcategory, _ = (
+            match_known_value(
+                subcategory_text,
+                KNOWN_SUBCATEGORIES,
+            )
+        )
+
+        subcategory = (
+            matched_subcategory
+            or subcategory_text
+        )
+
+    return (
+        department,
+        category,
+        subcategory,
+    )
+
+
+def find_category_control(
+    page: Page,
+) -> Locator:
+    dropdowns = page.locator(
+        '[data-test="dropdown"]'
+    )
+
+    for index in range(
+        dropdowns.count()
+    ):
+        dropdown = dropdowns.nth(index)
+
+        try:
+            if not dropdown.is_visible():
+                continue
+
+            text = normalize_text(
+                dropdown.inner_text()
+            )
+
+            if "select category" in text:
+                return dropdown
+
+        except Exception:
+            continue
+
+    raise RuntimeError(
+        "Could not find the category control."
+    )
+
+
+def find_subcategory_control(
+    page: Page,
+) -> Locator:
+    container = page.locator(
+        ".listing-editor__subcategory-container"
+    ).first
+
+    container.wait_for(
+        state="visible",
+        timeout=10000,
+    )
+
+    dropdown = container.locator(
+        '[data-test="dropdown"]'
+    ).first
+
+    dropdown.wait_for(
+        state="visible",
+        timeout=10000,
+    )
+
+    prevent_click = dropdown.get_attribute(
+        "preventclick"
+    )
+
+    if prevent_click == "true":
+        raise RuntimeError(
+            "The subcategory control is still disabled."
+        )
+
+    return dropdown
+
+
+def verify_subcategory(
+    page: Page,
+    subcategory: str,
+) -> None:
+    container = page.locator(
+        ".listing-editor__subcategory-container"
+    ).first
+
+    selected_text = normalize_text(
+        container.inner_text()
+    )
+
+    target = normalize_text(
+        subcategory
+    )
+
+    if target not in selected_text:
+        raise RuntimeError(
+            f"Subcategory {subcategory} was clicked, "
+            "but the field could not be verified."
+        )
+
+
+def fill_category(
+    page: Page,
+    category_text: str,
+) -> None:
+    (
+        department,
+        category,
+        subcategory,
+    ) = split_category(
+        category_text
+    )
+
+    print(
+        "Parsed category:",
+        {
+            "department": department,
+            "category": category,
+            "subcategory": subcategory,
+        },
+    )
+
+    category_control = find_category_control(
+        page
+    )
+
+    open_and_select(
+        page,
+        category_control,
+        department,
+    )
+
+    print(
+        f"Department selected: {department}"
+    )
+
+    if category:
+        select_visible_option(
+            page,
+            category,
+        )
+
+        print(
+            f"Category selected: {category}"
+        )
+
+    if subcategory:
+        page.wait_for_timeout(
+            1500
+        )
+
+        subcategory_control = (
+            find_subcategory_control(
+                page
+            )
+        )
+
+        open_and_select(
+            page,
+            subcategory_control,
+            subcategory,
+        )
+
+        verify_subcategory(
+            page,
+            subcategory,
+        )
+
+        print(
+            f"Subcategory selected: "
+            f"{subcategory}"
+        )
