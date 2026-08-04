@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
+import traceback
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 from urllib.parse import urlsplit
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Page, sync_playwright
 
 from data.database.database import (
     initialize_database,
@@ -49,17 +52,113 @@ from uploader.size import fill_size
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
-DISCOVERY_FILE = (
-    PROJECT_DIR
-    / "downloads"
-    / "discovered_listings.json"
-)
+DISCOVERY_FILE = PROJECT_DIR / "downloads" / "discovered_listings.json"
 DOWNLOADS_DIR = PROJECT_DIR / "downloads"
+LOGS_DIR = PROJECT_DIR / "logs"
+ERRORS_DIR = LOGS_DIR / "errors"
 
 SELL_URL = "https://poshmark.com/create-listing"
-DESTINATION_CLOSET_URL = (
-    "https://poshmark.com/closet/dveshop"
-)
+DESTINATION_CLOSET_URL = "https://poshmark.com/closet/dveshop"
+
+T = TypeVar("T")
+
+
+def timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def sanitize_filename(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", value)
+    return cleaned.strip("_")[:80] or "unknown"
+
+
+def save_error_artifacts(
+    page: Page | None,
+    *,
+    stage: str,
+    listing_id: str,
+    error: Exception,
+) -> None:
+    ERRORS_DIR.mkdir(parents=True, exist_ok=True)
+
+    stem = (
+        f"{timestamp()}_"
+        f"{sanitize_filename(stage)}_"
+        f"{sanitize_filename(listing_id)}"
+    )
+
+    text_path = ERRORS_DIR / f"{stem}.txt"
+
+    details = [
+        f"Stage: {stage}",
+        f"Listing ID: {listing_id}",
+        f"Error: {error}",
+        "",
+        traceback.format_exc(),
+    ]
+
+    text_path.write_text(
+        "\n".join(details),
+        encoding="utf-8",
+    )
+
+    if page is not None:
+        try:
+            screenshot_path = ERRORS_DIR / f"{stem}.png"
+            page.screenshot(
+                path=str(screenshot_path),
+                full_page=True,
+            )
+            print("Error screenshot:", screenshot_path)
+        except Exception as screenshot_error:
+            print("Could not save screenshot:", screenshot_error)
+
+    print("Error details:", text_path)
+
+
+def retry_operation(
+    operation: Callable[[], T],
+    *,
+    attempts: int,
+    delay_seconds: float,
+    page: Page | None,
+    stage: str,
+    listing_id: str,
+) -> T:
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            if attempt > 1:
+                print(
+                    f"Retrying {stage}: "
+                    f"attempt {attempt}/{attempts}"
+                )
+
+            return operation()
+
+        except Exception as error:
+            last_error = error
+
+            print(
+                f"{stage} failed "
+                f"(attempt {attempt}/{attempts}):"
+            )
+            print(error)
+
+            if attempt < attempts:
+                time.sleep(delay_seconds)
+
+    assert last_error is not None
+
+    save_error_artifacts(
+        page,
+        stage=stage,
+        listing_id=listing_id,
+        error=last_error,
+    )
+
+    raise last_error
 
 
 def load_available_discovery(
@@ -73,24 +172,18 @@ def load_available_discovery(
 
     try:
         payload = json.loads(
-            discovery_file.read_text(
-                encoding="utf-8"
-            )
+            discovery_file.read_text(encoding="utf-8")
         )
     except json.JSONDecodeError as error:
         raise RuntimeError(
             "Discovery file contains invalid JSON."
         ) from error
 
-    listings = payload.get(
-        "listings",
-        []
-    )
+    listings = payload.get("listings", [])
 
     if not isinstance(listings, list):
         raise RuntimeError(
-            "Discovery file does not contain "
-            "a listings array."
+            "Discovery file does not contain a listings array."
         )
 
     available: list[dict[str, Any]] = []
@@ -102,54 +195,29 @@ def load_available_discovery(
         if item.get("available") is not True:
             continue
 
-        listing_id = str(
-            item.get("listing_id", "")
-        ).strip()
+        listing_id = str(item.get("listing_id", "")).strip()
+        url = str(item.get("url", "")).strip()
 
-        url = str(
-            item.get("url", "")
-        ).strip()
-
-        if not listing_id or not url:
-            continue
-
-        available.append(item)
+        if listing_id and url:
+            available.append(item)
 
     return available
 
 
-def extract_listing_id_from_url(
-    listing_url: str,
-) -> str:
-    path = urlsplit(
-        listing_url
-    ).path.rstrip("/")
-
-    slug = path.rsplit(
-        "/",
-        1,
-    )[-1]
+def extract_listing_id_from_url(listing_url: str) -> str:
+    path = urlsplit(listing_url).path.rstrip("/")
+    slug = path.rsplit("/", 1)[-1]
 
     match = re.search(
         r"(?:-|^)([a-fA-F0-9]{24})$",
         slug,
     )
 
-    return (
-        match.group(1).lower()
-        if match
-        else ""
-    )
+    return match.group(1).lower() if match else ""
 
 
-def get_listing_json_path(
-    listing_id: str,
-) -> Path:
-    return (
-        DOWNLOADS_DIR
-        / listing_id
-        / "listing.json"
-    )
+def get_listing_json_path(listing_id: str) -> Path:
+    return DOWNLOADS_DIR / listing_id / "listing.json"
 
 
 def select_source_candidates(
@@ -159,13 +227,9 @@ def select_source_candidates(
     selected: list[dict[str, Any]] = []
 
     for item in available:
-        listing_id = str(
-            item["listing_id"]
-        )
+        listing_id = str(item["listing_id"])
 
-        if listing_already_copied(
-            listing_id
-        ):
+        if listing_already_copied(listing_id):
             continue
 
         selected.append(item)
@@ -177,34 +241,19 @@ def select_source_candidates(
 
 
 def ensure_listing_saved(
-    page,
+    page: Page,
     discovered: dict[str, Any],
 ) -> Path | None:
-    listing_id = str(
-        discovered["listing_id"]
-    )
+    listing_id = str(discovered["listing_id"])
 
-    if listing_already_copied(
-        listing_id
-    ):
-        print(
-            "Already copied according to "
-            "the database. Skipping scrape."
-        )
+    if listing_already_copied(listing_id):
+        print("Already copied according to the database.")
         return None
 
-    if listing_is_saved(
-        listing_id
-    ):
-        path = get_listing_json_path(
-            listing_id
-        )
-
-        print(
-            "Listing is already saved locally:"
-        )
+    if listing_is_saved(listing_id):
+        path = get_listing_json_path(listing_id)
+        print("Listing is already saved locally:")
         print(path)
-
         return path
 
     listing = scrape_listing(
@@ -212,34 +261,24 @@ def ensure_listing_saved(
         str(discovered["url"]),
     )
 
-    if not listing.get(
-        "available",
-        False,
-    ):
+    if not listing.get("available", False):
         print(
             "Listing failed the opened-page "
             "availability check."
         )
         print(
             "Reason:",
-            listing.get(
-                "availability_reason",
-                "",
-            ),
+            listing.get("availability_reason", ""),
         )
         return None
 
     path_value = str(
-        listing.get(
-            "listing_json",
-            "",
-        )
+        listing.get("listing_json", "")
     ).strip()
 
     if not path_value:
         raise RuntimeError(
-            "The scraper did not return "
-            "a listing_json path."
+            "The scraper did not return a listing_json path."
         )
 
     return Path(path_value)
@@ -279,7 +318,7 @@ def validate_listing(
 
 
 def fill_listing_form(
-    page,
+    page: Page,
     listing: dict[str, Any],
     image_paths: list[str],
 ) -> None:
@@ -289,83 +328,31 @@ def fill_listing_form(
         timeout=60_000,
     )
 
-    page.wait_for_timeout(
-        5000
-    )
+    page.wait_for_timeout(5000)
 
-    print(
-        "Create Listing page opened."
-    )
+    print("Create Listing page opened.")
 
-    upload_images(
-        page,
-        image_paths,
-    )
+    upload_images(page, image_paths)
+    fill_title(page, listing["title"])
+    fill_description(page, listing["description"])
+    fill_price(page, listing["price"])
+    close_price_modal(page)
+    fill_brand(page, listing["brand"])
+    fill_category(page, listing["category"])
+    fill_size(page, listing["size"])
+    fill_condition(page, listing["condition"])
+    fill_colors(page, listing.get("colors", []))
 
-    fill_title(
-        page,
-        listing["title"],
-    )
-
-    fill_description(
-        page,
-        listing["description"],
-    )
-
-    fill_price(
-        page,
-        listing["price"],
-    )
-
-    close_price_modal(
-        page
-    )
-
-    fill_brand(
-        page,
-        listing["brand"],
-    )
-
-    fill_category(
-        page,
-        listing["category"],
-    )
-
-    fill_size(
-        page,
-        listing["size"],
-    )
-
-    fill_condition(
-        page,
-        listing["condition"],
-    )
-
-    fill_colors(
-        page,
-        listing.get(
-            "colors",
-            [],
-        ),
-    )
-
-    print(
-        "All listing fields completed."
-    )
+    print("All listing fields completed.")
 
 
 def record_completion(
     listing: dict[str, Any],
     destination_url: str,
 ) -> None:
-    listing_id = str(
-        listing["listing_id"]
-    )
-
-    destination_id = (
-        extract_listing_id_from_url(
-            destination_url
-        )
+    listing_id = str(listing["listing_id"])
+    destination_id = extract_listing_id_from_url(
+        destination_url
     )
 
     mark_database_copied(
@@ -381,16 +368,13 @@ def record_completion(
 
 
 def process_destination_listing(
-    page,
+    page: Page,
     listing_file: Path,
     destination_urls: list[str],
     *,
     publish: bool,
 ) -> str:
-    listing = load_listing(
-        listing_file
-    )
-
+    listing = load_listing(listing_file)
     listing_id = str(
         listing.get("listing_id", "")
     )
@@ -400,27 +384,14 @@ def process_destination_listing(
             "Saved listing has no listing_id."
         )
 
-    if listing_already_copied(
-        listing_id
-    ):
-        print(
-            "Already copied according to "
-            "the database."
-        )
+    if listing_already_copied(listing_id):
+        print("Already copied according to the database.")
         return "already_recorded"
 
-    image_paths = get_image_paths(
-        listing
-    )
+    image_paths = get_image_paths(listing)
+    validate_listing(listing, image_paths)
 
-    validate_listing(
-        listing,
-        image_paths,
-    )
-
-    print(
-        "Checking dveshop for a duplicate..."
-    )
+    print("Checking dveshop for a duplicate...")
 
     existing_url = find_existing_duplicate(
         page,
@@ -438,21 +409,13 @@ def process_destination_listing(
             "Duplicate confirmed. "
             "No new listing was created."
         )
-        print(
-            "Existing destination:",
-            existing_url,
-        )
+        print("Existing destination:", existing_url)
 
         return "already_exists"
 
     if not publish:
-        print(
-            "DRY RUN: no duplicate found."
-        )
-        print(
-            "This listing would be uploaded."
-        )
-
+        print("DRY RUN: no duplicate found.")
+        print("This listing would be uploaded.")
         return "would_upload"
 
     fill_listing_form(
@@ -476,12 +439,60 @@ def process_destination_listing(
         destination_url,
     )
 
-    print(
-        "Published destination:",
-        destination_url,
-    )
+    print("Published destination:", destination_url)
 
     return "uploaded"
+
+
+def print_progress(
+    *,
+    processed: int,
+    total: int,
+    uploaded: int,
+    existing: int,
+    would_upload: int,
+    failed: int,
+    started_at: float,
+) -> None:
+    elapsed = max(
+        time.time() - started_at,
+        0.001,
+    )
+
+    rate = processed / elapsed
+    remaining = total - processed
+    eta_seconds = (
+        int(remaining / rate)
+        if rate > 0
+        else 0
+    )
+
+    eta_minutes, eta_seconds = divmod(
+        eta_seconds,
+        60,
+    )
+
+    percent = (
+        (processed / total) * 100
+        if total
+        else 100.0
+    )
+
+    print()
+    print("=" * 72)
+    print(
+        f"PROGRESS: {processed}/{total} "
+        f"({percent:.1f}%)"
+    )
+    print("Uploaded:", uploaded)
+    print("Already existed:", existing)
+    print("Would upload:", would_upload)
+    print("Failed:", failed)
+    print(
+        f"Estimated time remaining: "
+        f"{eta_minutes}m {eta_seconds}s"
+    )
+    print("=" * 72)
 
 
 def run_pipeline(
@@ -489,13 +500,21 @@ def run_pipeline(
     count: int,
     publish: bool,
     discovery_file: Path,
+    retries: int,
+    retry_delay: float,
 ) -> None:
     if count < 1:
         raise ValueError(
             "Count must be at least 1."
         )
 
+    if retries < 1:
+        raise ValueError(
+            "Retries must be at least 1."
+        )
+
     initialize_database()
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     available = load_available_discovery(
         discovery_file
@@ -523,12 +542,11 @@ def run_pipeline(
         if publish
         else "DRY RUN",
     )
+    print("Retries per operation:", retries)
     print("=" * 72)
 
     if not candidates:
-        print(
-            "No eligible listings were found."
-        )
+        print("No eligible listings were found.")
         return
 
     scraped_files: list[Path] = []
@@ -548,6 +566,10 @@ def run_pipeline(
                 candidates,
                 start=1,
             ):
+                listing_id = str(
+                    discovered["listing_id"]
+                )
+
                 print()
                 print("-" * 72)
                 print(
@@ -558,31 +580,31 @@ def run_pipeline(
                     "Title:",
                     discovered.get("title", ""),
                 )
-                print(
-                    "Listing ID:",
-                    discovered["listing_id"],
-                )
+                print("Listing ID:", listing_id)
 
                 try:
-                    saved_path = ensure_listing_saved(
-                        source_page,
-                        discovered,
+                    saved_path = retry_operation(
+                        lambda discovered=discovered: (
+                            ensure_listing_saved(
+                                source_page,
+                                discovered,
+                            )
+                        ),
+                        attempts=retries,
+                        delay_seconds=retry_delay,
+                        page=source_page,
+                        stage="source_scrape",
+                        listing_id=listing_id,
                     )
 
                     if saved_path is None:
                         unavailable += 1
                         continue
 
-                    scraped_files.append(
-                        saved_path
-                    )
+                    scraped_files.append(saved_path)
 
-                except Exception as error:
+                except Exception:
                     scrape_failed += 1
-                    print(
-                        "Source processing failed:"
-                    )
-                    print(error)
 
         finally:
             source_context.close()
@@ -608,6 +630,7 @@ def run_pipeline(
         would_upload = 0
         already_recorded = 0
         upload_failed = 0
+        started_at = time.time()
 
         try:
             destination_urls = (
@@ -617,27 +640,49 @@ def run_pipeline(
                 )
             )
 
+            total = len(scraped_files)
+
             for index, listing_file in enumerate(
                 scraped_files,
                 start=1,
             ):
+                listing = load_listing(
+                    listing_file
+                )
+
+                listing_id = str(
+                    listing.get(
+                        "listing_id",
+                        "unknown",
+                    )
+                )
+
                 print()
                 print("-" * 72)
                 print(
-                    f"DESTINATION {index}/"
-                    f"{len(scraped_files)}"
+                    f"DESTINATION {index}/{total}"
                 )
-                print(
-                    "Listing file:",
-                    listing_file,
-                )
+                print("Listing file:", listing_file)
 
                 try:
-                    result = process_destination_listing(
-                        destination_page,
-                        listing_file,
-                        destination_urls,
-                        publish=publish,
+                    result = retry_operation(
+                        lambda listing_file=listing_file: (
+                            process_destination_listing(
+                                destination_page,
+                                listing_file,
+                                destination_urls,
+                                publish=publish,
+                            )
+                        ),
+                        attempts=retries,
+                        delay_seconds=retry_delay,
+                        page=destination_page,
+                        stage=(
+                            "destination_publish"
+                            if publish
+                            else "destination_dry_run"
+                        ),
+                        listing_id=listing_id,
                     )
 
                     if result == "uploaded":
@@ -649,12 +694,18 @@ def run_pipeline(
                     elif result == "already_recorded":
                         already_recorded += 1
 
-                except Exception as error:
+                except Exception:
                     upload_failed += 1
-                    print(
-                        "Destination processing failed:"
-                    )
-                    print(error)
+
+                print_progress(
+                    processed=index,
+                    total=total,
+                    uploaded=uploaded,
+                    existing=existing,
+                    would_upload=would_upload,
+                    failed=upload_failed,
+                    started_at=started_at,
+                )
 
         finally:
             destination_context.close()
@@ -664,22 +715,10 @@ def run_pipeline(
     print("=" * 72)
     print("PIPELINE COMPLETE")
     print("=" * 72)
-    print(
-        "Source scrape failures:",
-        scrape_failed,
-    )
-    print(
-        "Unavailable after opening:",
-        unavailable,
-    )
-    print(
-        "Uploaded:",
-        uploaded,
-    )
-    print(
-        "Already existed in dveshop:",
-        existing,
-    )
+    print("Source scrape failures:", scrape_failed)
+    print("Unavailable after opening:", unavailable)
+    print("Uploaded:", uploaded)
+    print("Already existed in dveshop:", existing)
     print(
         "Would upload in live mode:",
         would_upload,
@@ -692,14 +731,18 @@ def run_pipeline(
         "Destination failures:",
         upload_failed,
     )
+    print(
+        "Error artifacts directory:",
+        ERRORS_DIR,
+    )
     print("=" * 72)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the PoshCopier source-to-destination "
-            "pipeline."
+            "Run the hardened PoshCopier "
+            "source-to-destination pipeline."
         )
     )
 
@@ -708,8 +751,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help=(
-            "Maximum number of source listings "
-            "to process."
+            "Maximum number of source "
+            "listings to process."
         ),
     )
 
@@ -717,8 +760,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--publish",
         action="store_true",
         help=(
-            "Actually publish listings. Without "
-            "this flag, the pipeline is a dry run."
+            "Actually publish listings. "
+            "Without this flag, the pipeline "
+            "is a dry run."
         ),
     )
 
@@ -726,6 +770,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--discovery-file",
         type=Path,
         default=DISCOVERY_FILE,
+    )
+
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=3,
+        help=(
+            "Attempts per scrape or destination "
+            "operation."
+        ),
+    )
+
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=3.0,
+        help=(
+            "Seconds to wait between retries."
+        ),
     )
 
     return parser
@@ -739,6 +802,8 @@ def main() -> None:
         count=args.count,
         publish=args.publish,
         discovery_file=args.discovery_file,
+        retries=args.retries,
+        retry_delay=args.retry_delay,
     )
 
 
