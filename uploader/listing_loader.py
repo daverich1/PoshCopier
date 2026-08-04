@@ -80,16 +80,21 @@ def get_image_paths(
 ) -> list[str]:
     image_paths = []
 
-    for saved_path in listing.get(
-        "downloaded_images",
-        [],
-    ):
+    # New format
+    saved_images = listing.get("local_images")
+
+    # Backward compatibility
+    if not saved_images:
+        saved_images = listing.get(
+            "downloaded_images",
+            [],
+        )
+
+    for saved_path in saved_images:
         path = Path(saved_path)
 
         if path.exists():
-            image_paths.append(
-                str(path)
-            )
+            image_paths.append(str(path))
         else:
             print(
                 "Missing image file:",
