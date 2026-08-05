@@ -59,3 +59,23 @@ downloads/
 build/
 dist/
 *.spec
+# Login/session files
+source_state.json
+destination_state.json
+
+# Runtime data
+poshcopier.db
+downloads/
+logs/
+
+# Playwright browsers
+pw-browsers/
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# Temporary packaging files
+packaging_files.txt
+dashboard/dashboard.before_packaging.py
