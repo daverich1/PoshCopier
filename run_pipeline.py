@@ -65,12 +65,18 @@ from uploader.size import fill_size
 
 from uploader.multi_size import fill_multi_size_inventory
 
+from runtime_paths import (
+    APP_DIR,
+    DISCOVERY_FILE,
+    DOWNLOADS_DIR,
+    ERRORS_DIR,
+    LOGS_DIR,
+    configure_playwright_browsers,
+    ensure_runtime_directories,
+)
 
-PROJECT_DIR = Path(__file__).resolve().parent
-DISCOVERY_FILE = PROJECT_DIR / "downloads" / "discovered_listings.json"
-DOWNLOADS_DIR = PROJECT_DIR / "downloads"
-LOGS_DIR = PROJECT_DIR / "logs"
-ERRORS_DIR = LOGS_DIR / "errors"
+
+PROJECT_DIR = APP_DIR
 
 SELL_URL = "https://poshmark.com/create-listing"
 DESTINATION_CLOSET_URL = "https://poshmark.com/closet/dveshop"
@@ -627,8 +633,9 @@ def run_pipeline(
             "Retries must be at least 1."
         )
 
+    configure_playwright_browsers()
+    ensure_runtime_directories()
     initialize_database()
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
     initialize_control_state()
 
     available = load_available_discovery(

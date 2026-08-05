@@ -31,8 +31,11 @@ DATABASE_FILE = APP_DIR / "poshcopier.db"
 PLAYWRIGHT_BROWSERS_DIR = APP_DIR / "pw-browsers"
 
 PIPELINE_SCRIPT = APP_DIR / "run_pipeline.py"
-PIPELINE_EXE = APP_DIR / "PoshCopierPipeline.exe"
-
+PIPELINE_EXE = (
+    APP_DIR
+    / "PoshCopierPipeline"
+    / "PoshCopierPipeline.exe"
+)
 
 def configure_playwright_browsers() -> None:
     if PLAYWRIGHT_BROWSERS_DIR.exists():
