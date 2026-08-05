@@ -19,8 +19,8 @@ class PoshCopierDashboard:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("PoshCopier Dashboard")
-        self.root.geometry("980x720")
-        self.root.minsize(820, 600)
+        self.root.geometry("980x780")
+        self.root.minsize(840, 660)
 
         self.process: subprocess.Popen[str] | None = None
         self.output_queue: queue.Queue[str] = queue.Queue()
@@ -32,6 +32,7 @@ class PoshCopierDashboard:
         self.retry_delay_var = tk.StringVar(value="3")
         self.status_var = tk.StringVar(value="Ready")
         self.progress_var = tk.DoubleVar(value=0.0)
+        self.command_input_var = tk.StringVar(value="")
 
         self._build_interface()
         self._poll_output_queue()
@@ -51,23 +52,17 @@ class PoshCopierDashboard:
             expand=True,
         )
 
-        title = ttk.Label(
+        ttk.Label(
             main,
             text="PoshCopier",
             font=("Segoe UI", 22, "bold"),
-        )
-        title.pack(
-            anchor="w",
-        )
+        ).pack(anchor="w")
 
-        subtitle = ttk.Label(
+        ttk.Label(
             main,
-            text=(
-                "Source-to-destination listing pipeline"
-            ),
+            text="Source-to-destination listing pipeline",
             font=("Segoe UI", 10),
-        )
-        subtitle.pack(
+        ).pack(
             anchor="w",
             pady=(0, 14),
         )
@@ -77,18 +72,10 @@ class PoshCopierDashboard:
             text="Run Settings",
             padding=12,
         )
-        settings.pack(
-            fill="x",
-        )
+        settings.pack(fill="x")
 
-        settings.columnconfigure(
-            1,
-            weight=1,
-        )
-        settings.columnconfigure(
-            3,
-            weight=1,
-        )
+        settings.columnconfigure(1, weight=1)
+        settings.columnconfigure(3, weight=1)
 
         ttk.Label(
             settings,
@@ -101,9 +88,7 @@ class PoshCopierDashboard:
             pady=4,
         )
 
-        mode_frame = ttk.Frame(
-            settings
-        )
+        mode_frame = ttk.Frame(settings)
         mode_frame.grid(
             row=0,
             column=1,
@@ -126,9 +111,7 @@ class PoshCopierDashboard:
             text="Live Publish",
             variable=self.mode_var,
             value="publish",
-        ).pack(
-            side="left",
-        )
+        ).pack(side="left")
 
         ttk.Label(
             settings,
@@ -141,12 +124,11 @@ class PoshCopierDashboard:
             pady=4,
         )
 
-        self.count_entry = ttk.Entry(
+        ttk.Entry(
             settings,
             textvariable=self.count_var,
             width=12,
-        )
-        self.count_entry.grid(
+        ).grid(
             row=0,
             column=3,
             sticky="w",
@@ -164,12 +146,11 @@ class PoshCopierDashboard:
             pady=4,
         )
 
-        self.retries_entry = ttk.Entry(
+        ttk.Entry(
             settings,
             textvariable=self.retries_var,
             width=12,
-        )
-        self.retries_entry.grid(
+        ).grid(
             row=1,
             column=1,
             sticky="w",
@@ -187,21 +168,18 @@ class PoshCopierDashboard:
             pady=4,
         )
 
-        self.retry_delay_entry = ttk.Entry(
+        ttk.Entry(
             settings,
             textvariable=self.retry_delay_var,
             width=12,
-        )
-        self.retry_delay_entry.grid(
+        ).grid(
             row=1,
             column=3,
             sticky="w",
             pady=4,
         )
 
-        controls = ttk.Frame(
-            main
-        )
+        controls = ttk.Frame(main)
         controls.pack(
             fill="x",
             pady=12,
@@ -212,9 +190,7 @@ class PoshCopierDashboard:
             text="Start",
             command=self.start_pipeline,
         )
-        self.start_button.pack(
-            side="left",
-        )
+        self.start_button.pack(side="left")
 
         self.stop_button = ttk.Button(
             controls,
@@ -227,22 +203,20 @@ class PoshCopierDashboard:
             padx=(8, 0),
         )
 
-        self.clear_button = ttk.Button(
+        ttk.Button(
             controls,
             text="Clear Log",
             command=self.clear_log,
-        )
-        self.clear_button.pack(
+        ).pack(
             side="left",
             padx=(8, 0),
         )
 
-        self.logs_button = ttk.Button(
+        ttk.Button(
             controls,
             text="Open Logs",
             command=self.open_logs_folder,
-        )
-        self.logs_button.pack(
+        ).pack(
             side="left",
             padx=(8, 0),
         )
@@ -261,19 +235,73 @@ class PoshCopierDashboard:
             status_frame,
             textvariable=self.status_var,
             font=("Segoe UI", 10, "bold"),
-        ).pack(
-            anchor="w",
-        )
+        ).pack(anchor="w")
 
-        self.progress_bar = ttk.Progressbar(
+        ttk.Progressbar(
             status_frame,
             variable=self.progress_var,
             maximum=100,
             mode="determinate",
-        )
-        self.progress_bar.pack(
+        ).pack(
             fill="x",
             pady=(8, 0),
+        )
+
+        input_frame = ttk.LabelFrame(
+            main,
+            text="Pipeline Input",
+            padding=10,
+        )
+        input_frame.pack(
+            fill="x",
+            pady=(0, 12),
+        )
+
+        input_frame.columnconfigure(
+            0,
+            weight=1,
+        )
+
+        self.command_entry = ttk.Entry(
+            input_frame,
+            textvariable=self.command_input_var,
+            state="disabled",
+        )
+        self.command_entry.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, 8),
+        )
+
+        self.command_entry.bind(
+            "<Return>",
+            lambda _event: self.send_pipeline_input(),
+        )
+
+        self.send_button = ttk.Button(
+            input_frame,
+            text="Send",
+            command=self.send_pipeline_input,
+            state="disabled",
+        )
+        self.send_button.grid(
+            row=0,
+            column=1,
+        )
+
+        ttk.Label(
+            input_frame,
+            text=(
+                "When prompted, type PUBLISH here "
+                "and press Enter or click Send."
+            ),
+        ).grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(6, 0),
         )
 
         log_frame = ttk.LabelFrame(
@@ -286,14 +314,8 @@ class PoshCopierDashboard:
             expand=True,
         )
 
-        log_frame.rowconfigure(
-            0,
-            weight=1,
-        )
-        log_frame.columnconfigure(
-            0,
-            weight=1,
-        )
+        log_frame.rowconfigure(0, weight=1)
+        log_frame.columnconfigure(0, weight=1)
 
         self.log_text = tk.Text(
             log_frame,
@@ -326,12 +348,8 @@ class PoshCopierDashboard:
         self,
     ) -> tuple[int, int, float] | None:
         try:
-            count = int(
-                self.count_var.get().strip()
-            )
-            retries = int(
-                self.retries_var.get().strip()
-            )
+            count = int(self.count_var.get().strip())
+            retries = int(self.retries_var.get().strip())
             retry_delay = float(
                 self.retry_delay_var.get().strip()
             )
@@ -364,11 +382,7 @@ class PoshCopierDashboard:
             )
             return None
 
-        return (
-            count,
-            retries,
-            retry_delay,
-        )
+        return count, retries, retry_delay
 
     def build_command(
         self,
@@ -378,6 +392,7 @@ class PoshCopierDashboard:
     ) -> list[str]:
         command = [
             sys.executable,
+            "-u",
             str(PIPELINE_FILE),
             "--count",
             str(count),
@@ -387,13 +402,8 @@ class PoshCopierDashboard:
             str(retry_delay),
         ]
 
-        if (
-            self.mode_var.get()
-            == "publish"
-        ):
-            command.append(
-                "--publish"
-            )
+        if self.mode_var.get() == "publish":
+            command.append("--publish")
 
         return command
 
@@ -422,16 +432,12 @@ class PoshCopierDashboard:
 
         count, retries, retry_delay = settings
 
-        if (
-            self.mode_var.get()
-            == "publish"
-        ):
+        if self.mode_var.get() == "publish":
             confirmed = messagebox.askyesno(
                 "Confirm Live Publishing",
                 (
                     f"This will attempt to publish up to "
-                    f"{count} listing(s).\n\n"
-                    "Continue?"
+                    f"{count} listing(s).\n\nContinue?"
                 ),
             )
 
@@ -454,17 +460,20 @@ class PoshCopierDashboard:
             + "\n"
         )
 
-        self.progress_var.set(
-            0.0
-        )
-        self.status_var.set(
-            "Running"
-        )
+        self.progress_var.set(0.0)
+        self.status_var.set("Running")
+        self.command_input_var.set("")
 
         self.start_button.configure(
             state="disabled",
         )
         self.stop_button.configure(
+            state="normal",
+        )
+        self.command_entry.configure(
+            state="normal",
+        )
+        self.send_button.configure(
             state="normal",
         )
 
@@ -481,7 +490,7 @@ class PoshCopierDashboard:
                 cwd=str(PROJECT_DIR),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                stdin=None,
+                stdin=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -490,13 +499,17 @@ class PoshCopierDashboard:
             )
         except Exception as error:
             self.process = None
-            self.status_var.set(
-                "Failed to start"
-            )
+            self.status_var.set("Failed to start")
             self.start_button.configure(
                 state="normal",
             )
             self.stop_button.configure(
+                state="disabled",
+            )
+            self.command_entry.configure(
+                state="disabled",
+            )
+            self.send_button.configure(
                 state="disabled",
             )
 
@@ -512,6 +525,42 @@ class PoshCopierDashboard:
         )
         self.reader_thread.start()
 
+    def send_pipeline_input(self) -> None:
+        process = self.process
+
+        if (
+            process is None
+            or process.poll() is not None
+            or process.stdin is None
+        ):
+            messagebox.showwarning(
+                "Pipeline Not Running",
+                "There is no active pipeline to receive input.",
+            )
+            return
+
+        value = self.command_input_var.get().strip()
+
+        if not value:
+            return
+
+        try:
+            process.stdin.write(value + "\n")
+            process.stdin.flush()
+
+            self.append_log(
+                f"\n[Sent input: {value}]\n"
+            )
+
+            self.command_input_var.set("")
+            self.command_entry.focus_set()
+
+        except Exception as error:
+            messagebox.showerror(
+                "Input Failed",
+                str(error),
+            )
+
     def _read_process_output(self) -> None:
         process = self.process
 
@@ -523,9 +572,7 @@ class PoshCopierDashboard:
 
         try:
             for line in process.stdout:
-                self.output_queue.put(
-                    line
-                )
+                self.output_queue.put(line)
         finally:
             return_code = process.wait()
 
@@ -533,7 +580,6 @@ class PoshCopierDashboard:
                 f"\n[Process exited with code "
                 f"{return_code}]\n"
             )
-
             self.output_queue.put(
                 "__PROCESS_FINISHED__"
             )
@@ -547,12 +593,17 @@ class PoshCopierDashboard:
                     self._process_finished()
                     continue
 
-                self.append_log(
-                    message
-                )
-                self._update_progress_from_line(
-                    message
-                )
+                self.append_log(message)
+                self._update_progress_from_line(message)
+
+                if (
+                    "Type PUBLISH to click the final button"
+                    in message
+                ):
+                    self.status_var.set(
+                        "Waiting for PUBLISH"
+                    )
+                    self.command_entry.focus_set()
 
         except queue.Empty:
             pass
@@ -568,15 +619,11 @@ class PoshCopierDashboard:
     ) -> None:
         line = line.strip()
 
-        if not line.startswith(
-            "PROGRESS:"
-        ):
+        if not line.startswith("PROGRESS:"):
             return
 
         try:
-            percent_start = line.index(
-                "("
-            ) + 1
+            percent_start = line.index("(") + 1
             percent_end = line.index(
                 "%",
                 percent_start,
@@ -589,18 +636,10 @@ class PoshCopierDashboard:
                 ]
             )
 
-            self.progress_var.set(
-                percent
-            )
+            self.progress_var.set(percent)
+            self.status_var.set(line)
 
-            self.status_var.set(
-                line
-            )
-
-        except (
-            ValueError,
-            IndexError,
-        ):
+        except (ValueError, IndexError):
             pass
 
     def _process_finished(self) -> None:
@@ -616,14 +655,16 @@ class PoshCopierDashboard:
         self.stop_button.configure(
             state="disabled",
         )
+        self.command_entry.configure(
+            state="disabled",
+        )
+        self.send_button.configure(
+            state="disabled",
+        )
 
         if return_code == 0:
-            self.status_var.set(
-                "Completed"
-            )
-            self.progress_var.set(
-                100.0
-            )
+            self.status_var.set("Completed")
+            self.progress_var.set(100.0)
         else:
             self.status_var.set(
                 f"Stopped or failed "
@@ -653,9 +694,7 @@ class PoshCopierDashboard:
         if not confirmed:
             return
 
-        self.status_var.set(
-            "Stopping..."
-        )
+        self.status_var.set("Stopping...")
 
         try:
             process.terminate()
@@ -677,10 +716,7 @@ class PoshCopierDashboard:
             state="disabled",
         )
 
-    def append_log(
-        self,
-        text: str,
-    ) -> None:
+    def append_log(self, text: str) -> None:
         self.log_text.configure(
             state="normal",
         )
@@ -688,9 +724,7 @@ class PoshCopierDashboard:
             "end",
             text,
         )
-        self.log_text.see(
-            "end"
-        )
+        self.log_text.see("end")
         self.log_text.configure(
             state="disabled",
         )
@@ -703,22 +737,14 @@ class PoshCopierDashboard:
 
         try:
             if os.name == "nt":
-                os.startfile(
-                    str(LOGS_DIR)
-                )
+                os.startfile(str(LOGS_DIR))
             elif sys.platform == "darwin":
                 subprocess.Popen(
-                    [
-                        "open",
-                        str(LOGS_DIR),
-                    ]
+                    ["open", str(LOGS_DIR)]
                 )
             else:
                 subprocess.Popen(
-                    [
-                        "xdg-open",
-                        str(LOGS_DIR),
-                    ]
+                    ["xdg-open", str(LOGS_DIR)]
                 )
         except Exception as error:
             messagebox.showerror(
