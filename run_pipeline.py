@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import argparse
 import json
 import re
@@ -78,6 +79,47 @@ def timestamp() -> str:
 def sanitize_filename(value: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", value)
     return cleaned.strip("_")[:80] or "unknown"
+
+
+def emit_status(
+    key: str,
+    value: str,
+) -> None:
+    """Emit a structured dashboard event as STATUS:KEY=VALUE."""
+    safe_value = str(value).replace("\r", " ").replace("\n", " ")
+    print(
+        f"STATUS:{key}={safe_value}",
+        flush=True,
+    )
+
+
+def configure_output_encoding() -> None:
+    for stream_name in (
+        "stdout",
+        "stderr",
+    ):
+        stream = getattr(
+            sys,
+            stream_name,
+            None,
+        )
+
+        if (
+            stream is None
+            or not hasattr(
+                stream,
+                "reconfigure",
+            )
+        ):
+            continue
+
+        try:
+            stream.reconfigure(
+                encoding="utf-8",
+                errors="replace",
+            )
+        except Exception:
+            pass
 
 
 def save_error_artifacts(
@@ -256,19 +298,6 @@ def select_source_candidates(
 
     return selected
 
-    for item in available:
-        listing_id = str(item["listing_id"])
-
-        if listing_already_copied(listing_id):
-            continue
-
-        selected.append(item)
-
-        if len(selected) >= count:
-            break
-
-    return selected
-
 
 def ensure_listing_saved(
     page: Page,
@@ -352,6 +381,11 @@ def fill_listing_form(
     listing: dict[str, Any],
     image_paths: list[str],
 ) -> None:
+    emit_status(
+        "STEP",
+        "Opening Create Listing Page",
+    )
+
     page.goto(
         SELL_URL,
         wait_until="domcontentloaded",
@@ -362,28 +396,51 @@ def fill_listing_form(
 
     print("Create Listing page opened.")
 
+    emit_status("STEP", "Uploading Images")
     upload_images(page, image_paths)
+
+    emit_status("STEP", "Entering Title")
     fill_title(page, listing["title"])
+
+    emit_status("STEP", "Entering Description")
     fill_description(page, listing["description"])
+
+    emit_status("STEP", "Entering Price")
     fill_price(page, listing["price"])
+
+    emit_status("STEP", "Closing Price Modal")
     close_price_modal(page)
+
+    emit_status("STEP", "Selecting Brand")
     fill_brand(page, listing["brand"])
+
+    emit_status("STEP", "Selecting Category")
     fill_category(page, listing["category"])
+
     if listing.get("is_multi_size"):
+        emit_status(
+            "STEP",
+            "Creating Multi-size Inventory",
+        )
         fill_multi_size_inventory(
             page,
             listing,
         )
     else:
+        emit_status("STEP", "Selecting Size")
         fill_size(
             page,
             listing["size"],
         )
+
+    emit_status("STEP", "Selecting Condition")
     fill_condition(page, listing["condition"])
+
+    emit_status("STEP", "Selecting Colors")
     fill_colors(page, listing.get("colors", []))
 
+    emit_status("STEP", "Form Complete")
     print("All listing fields completed.")
-
 
 def record_completion(
     listing: dict[str, Any],
@@ -430,6 +487,7 @@ def process_destination_listing(
     image_paths = get_image_paths(listing)
     validate_listing(listing, image_paths)
 
+    emit_status("STEP", "Checking for Duplicate")
     print("Checking dveshop for a duplicate...")
 
     existing_url = find_existing_duplicate(
@@ -463,11 +521,13 @@ def process_destination_listing(
         image_paths,
     )
 
+    emit_status("STEP", "Waiting for Publish Confirmation")
     destination_url = publish_listing(
         page,
         str(listing["title"]),
     )
 
+    emit_status("STEP", "Recording Completion")
     record_completion(
         listing,
         destination_url,
@@ -478,6 +538,7 @@ def process_destination_listing(
         destination_url,
     )
 
+    emit_status("STEP", "Published")
     print("Published destination:", destination_url)
 
     return "uploaded"
@@ -532,6 +593,14 @@ def print_progress(
         f"{eta_minutes}m {eta_seconds}s"
     )
     print("=" * 72)
+
+    emit_status("PROGRESS", f"{processed}/{total}")
+    emit_status("PERCENT", f"{percent:.1f}")
+    emit_status("UPLOADED", str(uploaded))
+    emit_status("EXISTING", str(existing))
+    emit_status("WOULD_UPLOAD", str(would_upload))
+    emit_status("FAILED", str(failed))
+    emit_status("ETA", f"{eta_minutes}m {eta_seconds}s")
 
 
 def run_pipeline(
@@ -601,6 +670,13 @@ def run_pipeline(
     print("Retries per operation:", retries)
     print("=" * 72)
 
+    emit_status(
+        "MODE",
+        "LIVE PUBLISH" if publish else "DRY RUN",
+    )
+    emit_status("TOTAL", str(len(candidates)))
+    emit_status("STEP", "Preparing Source Listings")
+
     if not candidates:
         print("No eligible listings were found.")
         return
@@ -637,6 +713,12 @@ def run_pipeline(
                     discovered.get("title", ""),
                 )
                 print("Listing ID:", listing_id)
+
+                emit_status(
+                    "TITLE",
+                    str(discovered.get("title", "")),
+                )
+                emit_status("STEP", "Scraping Source Listing")
 
                 try:
                     saved_path = retry_operation(
@@ -689,6 +771,11 @@ def run_pipeline(
         started_at = time.time()
 
         try:
+            emit_status(
+                "STEP",
+                "Scanning Destination Closet",
+            )
+
             destination_urls = (
                 collect_destination_listing_urls(
                     destination_page,
@@ -719,6 +806,30 @@ def run_pipeline(
                     f"DESTINATION {index}/{total}"
                 )
                 print("Listing file:", listing_file)
+
+                emit_status(
+                    "TITLE",
+                    str(listing.get("title", "")),
+                )
+                emit_status(
+                    "PRICE",
+                    str(listing.get("price", "")),
+                )
+                emit_status(
+                    "SIZES",
+                    ", ".join(
+                        str(value)
+                        for value in (
+                            listing.get("sizes")
+                            or [listing.get("size", "")]
+                        )
+                        if str(value).strip()
+                    ),
+                )
+                emit_status(
+                    "STEP",
+                    "Processing Destination Listing",
+                )
 
                 try:
                     result = retry_operation(
@@ -752,6 +863,7 @@ def run_pipeline(
 
                 except Exception:
                     upload_failed += 1
+                    emit_status("STEP", "Listing Failed")
 
                     add_completed_listing(
                         listing_id
@@ -819,6 +931,13 @@ def run_pipeline(
         ERRORS_DIR,
     )
     print("=" * 72)
+
+    emit_status("STEP", "Pipeline Complete")
+    emit_status("UPLOADED", str(uploaded))
+    emit_status("EXISTING", str(existing))
+    emit_status("FAILED", str(upload_failed))
+    emit_status("PERCENT", "100.0")
+
     if clear_resume_state():
         print(
             "Resume checkpoint cleared "
@@ -883,6 +1002,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    configure_output_encoding()
+
     parser = build_parser()
     args = parser.parse_args()
 
