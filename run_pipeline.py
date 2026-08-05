@@ -17,6 +17,12 @@ from resume_state import (
     load_resume_state,
     save_resume_state,
 )
+from pipeline_control import (
+    clear_control_state,
+    initialize_control_state,
+    stop_after_current_requested,
+    wait_while_paused,
+)
 from playwright.sync_api import Page, sync_playwright
 
 from data.database.database import (
@@ -623,6 +629,7 @@ def run_pipeline(
 
     initialize_database()
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    initialize_control_state()
 
     available = load_available_discovery(
         discovery_file
@@ -789,6 +796,16 @@ def run_pipeline(
                 scraped_files,
                 start=1,
             ):
+                wait_while_paused(
+                    on_paused=lambda: emit_status(
+                        "STEP",
+                        "Paused",
+                    ),
+                    on_resumed=lambda: emit_status(
+                        "STEP",
+                        "Resumed",
+                    ),
+                )
                 listing = load_listing(
                     listing_file
                 )
@@ -905,6 +922,40 @@ def run_pipeline(
                     failed=upload_failed,
                     started_at=started_at,
                 )
+                if stop_after_current_requested():
+                    emit_status(
+                        "STEP",
+                        "Stopped After Current Listing",
+                    )
+
+                    save_resume_state(
+                        mode=(
+                            "live_publish"
+                            if publish
+                            else "dry_run"
+                        ),
+                        requested_count=count,
+                        processed=index,
+                        uploaded=uploaded,
+                        existing=existing,
+                        unavailable=unavailable,
+                        failed=upload_failed,
+                        already_recorded=already_recorded,
+                        would_upload=would_upload,
+                        last_listing_id=listing_id,
+                        last_listing_title=str(
+                            listing.get(
+                                "title",
+                                "",
+                            )
+                        ),
+                    )
+
+                    print(
+                        "Stop-after-current requested. "
+                        "Ending the run safely."
+                    )
+                    return
 
         finally:
             destination_context.close()

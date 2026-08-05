@@ -25,18 +25,11 @@ from pipeline_control import (
     request_resume,
     request_stop_after_current,
 )
-from runtime_paths import (
-    APP_DIR,
-    LOGS_DIR,
-    PIPELINE_EXE,
-    PIPELINE_SCRIPT,
-    ensure_runtime_directories,
-    is_frozen,
-)
 
 
-PROJECT_DIR = APP_DIR
-PIPELINE_FILE = PIPELINE_SCRIPT
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+PIPELINE_FILE = PROJECT_DIR / "run_pipeline.py"
+LOGS_DIR = PROJECT_DIR / "logs"
 
 
 class PoshCopierDashboard:
@@ -49,7 +42,6 @@ class PoshCopierDashboard:
         self.root.geometry("1050x980")
         self.root.minsize(900, 760)
 
-        ensure_runtime_directories()
         apply_styles(root)
 
         self.process: subprocess.Popen[str] | None = None
@@ -212,11 +204,15 @@ class PoshCopierDashboard:
             on_start=self.start_pipeline,
             on_pause=self.pause_pipeline,
             on_resume=self.resume_pipeline,
-            on_stop_after_current=self.stop_after_current,
+            on_stop_after_current=(
+                 self.stop_after_current
+            ),
             on_stop=self.stop_pipeline,
             on_clear_log=self.clear_log,
             on_open_logs=self.open_logs_folder,
+        
         )
+
         self.controls.pack(
             fill="x",
             pady=12,
@@ -379,7 +375,10 @@ class PoshCopierDashboard:
         retries: int,
         retry_delay: float,
     ) -> list[str]:
-        arguments = [
+        command = [
+            sys.executable,
+            "-u",
+            str(PIPELINE_FILE),
             "--count",
             str(count),
             "--retries",
@@ -389,26 +388,9 @@ class PoshCopierDashboard:
         ]
 
         if self.mode_var.get() == "publish":
-            arguments.append("--publish")
+            command.append("--publish")
 
-        if is_frozen():
-            if not PIPELINE_EXE.exists():
-                raise FileNotFoundError(
-                    "PoshCopierPipeline.exe was not found beside "
-                    "PoshCopier.exe."
-                )
-
-            return [
-                str(PIPELINE_EXE),
-                *arguments,
-            ]
-
-        return [
-            sys.executable,
-            "-u",
-            str(PIPELINE_FILE),
-            *arguments,
-        ]
+        return command
 
     def start_pipeline(self) -> None:
         if (
@@ -418,6 +400,13 @@ class PoshCopierDashboard:
             messagebox.showwarning(
                 "Already Running",
                 "The pipeline is already running.",
+            )
+            return
+
+        if not PIPELINE_FILE.exists():
+            messagebox.showerror(
+                "Missing Pipeline",
+                f"Could not find:\n{PIPELINE_FILE}",
             )
             return
 
@@ -440,18 +429,11 @@ class PoshCopierDashboard:
             if not confirmed:
                 return
 
-        try:
-            command = self.build_command(
-                count,
-                retries,
-                retry_delay,
-            )
-        except Exception as error:
-            messagebox.showerror(
-                "Missing Pipeline",
-                str(error),
-            )
-            return
+        command = self.build_command(
+            count,
+            retries,
+            retry_delay,
+        )
 
         self.thumbnail_panel.reset()
         self.status_panel.reset()
@@ -483,11 +465,6 @@ class PoshCopierDashboard:
             creation_flags = (
                 subprocess.CREATE_NEW_PROCESS_GROUP
             )
-
-            if is_frozen():
-                creation_flags |= (
-                    subprocess.CREATE_NO_WINDOW
-                )
 
         try:
             self.process = subprocess.Popen(
@@ -734,7 +711,6 @@ class PoshCopierDashboard:
             )
 
         self.process = None
-
     def pause_pipeline(self) -> None:
         process = self.process
 
@@ -748,7 +724,7 @@ class PoshCopierDashboard:
             request_pause()
             self.controls.set_paused(True)
             self.status_panel.set_step(
-                "Pause requested - finishing current listing"
+                "Pause requested — finishing current listing"
             )
         except Exception as error:
             messagebox.showerror(
@@ -807,7 +783,6 @@ class PoshCopierDashboard:
                 "Stop Request Failed",
                 str(error),
             )
-
     def stop_pipeline(self) -> None:
         process = self.process
 
@@ -897,3 +872,94 @@ class PoshCopierDashboard:
                 pass
 
         self.root.destroy()
+from pathlib import Path
+
+from playwright.sync_api import sync_playwright
+
+
+PROJECT_DIR = Path(__file__).resolve().parent
+
+SOURCE_STATE_FILE = PROJECT_DIR / "source_state.json"
+DESTINATION_STATE_FILE = PROJECT_DIR / "destination_state.json"
+
+
+def save_login(state_file):
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=False
+        )
+
+        context = browser.new_context()
+        page = context.new_page()
+
+        page.goto(
+            "https://poshmark.com/login",
+            wait_until="domcontentloaded",
+        )
+
+        print("=" * 50)
+        print("Log into the correct Poshmark account.")
+        print("After you are completely logged in,")
+        print("press ENTER in this terminal.")
+        print("=" * 50)
+
+        input()
+
+        context.storage_state(
+            path=str(state_file)
+        )
+
+        context.close()
+        browser.close()
+
+        print(f"Login saved to: {state_file.name}")
+
+
+def save_source_login():
+    save_login(SOURCE_STATE_FILE)
+
+
+def save_destination_login():
+    save_login(DESTINATION_STATE_FILE)
+
+
+def open_logged_in_browser(
+    playwright,
+    state_file=DESTINATION_STATE_FILE,
+):
+    if not state_file.exists():
+        raise FileNotFoundError(
+            f"{state_file.name} was not found."
+        )
+
+    browser = playwright.chromium.launch(
+        headless=False
+    )
+
+    context = browser.new_context(
+        storage_state=str(state_file)
+    )
+
+    page = context.new_page()
+
+    page.goto(
+        "https://poshmark.com/feed",
+        wait_until="domcontentloaded",
+    )
+
+    return browser, context, page
+
+
+if __name__ == "__main__":
+    print("Which account do you want to save?")
+    print("1. Source store")
+    print("2. Destination store — dveshop")
+
+    choice = input("Enter 1 or 2: ").strip()
+
+    if choice == "1":
+        save_source_login()
+    elif choice == "2":
+        save_destination_login()
+    else:
+        print("Invalid choice.")

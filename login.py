@@ -1,12 +1,15 @@
-from pathlib import Path
+from __future__ import annotations
 
 from playwright.sync_api import sync_playwright
 
+from runtime_paths import (
+    DESTINATION_STATE_FILE,
+    SOURCE_STATE_FILE,
+    configure_playwright_browsers,
+)
 
-PROJECT_DIR = Path(__file__).resolve().parent
 
-SOURCE_STATE_FILE = PROJECT_DIR / "source_state.json"
-DESTINATION_STATE_FILE = PROJECT_DIR / "destination_state.json"
+configure_playwright_browsers()
 
 
 def save_login(state_file):
@@ -53,9 +56,12 @@ def open_logged_in_browser(
     playwright,
     state_file=DESTINATION_STATE_FILE,
 ):
+    configure_playwright_browsers()
+
     if not state_file.exists():
         raise FileNotFoundError(
-            f"{state_file.name} was not found."
+            f"{state_file.name} was not found beside "
+            "the PoshCopier application."
         )
 
     browser = playwright.chromium.launch(
@@ -79,7 +85,7 @@ def open_logged_in_browser(
 if __name__ == "__main__":
     print("Which account do you want to save?")
     print("1. Source store")
-    print("2. Destination store — dveshop")
+    print("2. Destination store - dveshop")
 
     choice = input("Enter 1 or 2: ").strip()
 
