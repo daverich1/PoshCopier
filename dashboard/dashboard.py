@@ -19,6 +19,7 @@ from dashboard.pipeline_io import (
 from dashboard.progress_panel import ProgressPanel
 from dashboard.status_panel import StatusPanel
 from dashboard.styles import apply_styles
+from dashboard.thumbnail_panel import ThumbnailPanel
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -33,8 +34,8 @@ class PoshCopierDashboard:
     ) -> None:
         self.root = root
         self.root.title("PoshCopier Dashboard")
-        self.root.geometry("1050x900")
-        self.root.minsize(900, 720)
+        self.root.geometry("1050x980")
+        self.root.minsize(900, 760)
 
         apply_styles(root)
 
@@ -42,21 +43,11 @@ class PoshCopierDashboard:
         self.output_queue: queue.Queue[str] = queue.Queue()
         self.reader_thread: threading.Thread | None = None
 
-        self.mode_var = tk.StringVar(
-            value="dry_run"
-        )
-        self.count_var = tk.StringVar(
-            value="5"
-        )
-        self.retries_var = tk.StringVar(
-            value="3"
-        )
-        self.retry_delay_var = tk.StringVar(
-            value="3"
-        )
-        self.command_input_var = tk.StringVar(
-            value=""
-        )
+        self.mode_var = tk.StringVar(value="dry_run")
+        self.count_var = tk.StringVar(value="5")
+        self.retries_var = tk.StringVar(value="3")
+        self.retry_delay_var = tk.StringVar(value="3")
+        self.command_input_var = tk.StringVar(value="")
 
         self._build_interface()
         self._poll_output_queue()
@@ -80,15 +71,11 @@ class PoshCopierDashboard:
             main,
             text="PoshCopier",
             style="Title.TLabel",
-        ).pack(
-            anchor="w",
-        )
+        ).pack(anchor="w")
 
         ttk.Label(
             main,
-            text=(
-                "Source-to-destination listing pipeline"
-            ),
+            text="Source-to-destination listing pipeline",
             style="Subtitle.TLabel",
         ).pack(
             anchor="w",
@@ -100,18 +87,10 @@ class PoshCopierDashboard:
             text="Run Settings",
             padding=12,
         )
-        settings.pack(
-            fill="x",
-        )
+        settings.pack(fill="x")
 
-        settings.columnconfigure(
-            1,
-            weight=1,
-        )
-        settings.columnconfigure(
-            3,
-            weight=1,
-        )
+        settings.columnconfigure(1, weight=1)
+        settings.columnconfigure(3, weight=1)
 
         ttk.Label(
             settings,
@@ -124,9 +103,7 @@ class PoshCopierDashboard:
             pady=4,
         )
 
-        mode_frame = ttk.Frame(
-            settings
-        )
+        mode_frame = ttk.Frame(settings)
         mode_frame.grid(
             row=0,
             column=1,
@@ -149,9 +126,7 @@ class PoshCopierDashboard:
             text="Live Publish",
             variable=self.mode_var,
             value="publish",
-        ).pack(
-            side="left",
-        )
+        ).pack(side="left")
 
         ttk.Label(
             settings,
@@ -231,12 +206,38 @@ class PoshCopierDashboard:
             pady=12,
         )
 
-        self.status_panel = StatusPanel(
-            main
-        )
-        self.status_panel.pack(
+        upper_content = ttk.Frame(main)
+        upper_content.pack(
             fill="x",
             pady=(0, 12),
+        )
+
+        upper_content.columnconfigure(
+            0,
+            weight=0,
+        )
+        upper_content.columnconfigure(
+            1,
+            weight=1,
+        )
+
+        self.thumbnail_panel = ThumbnailPanel(
+            upper_content
+        )
+        self.thumbnail_panel.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=(0, 12),
+        )
+
+        self.status_panel = StatusPanel(
+            upper_content
+        )
+        self.status_panel.grid(
+            row=0,
+            column=1,
+            sticky="nsew",
         )
 
         self.progress_panel = ProgressPanel(
@@ -304,9 +305,7 @@ class PoshCopierDashboard:
             pady=(6, 0),
         )
 
-        self.activity_log = ActivityLog(
-            main
-        )
+        self.activity_log = ActivityLog(main)
         self.activity_log.pack(
             fill="both",
             expand=True,
@@ -356,11 +355,7 @@ class PoshCopierDashboard:
             )
             return None
 
-        return (
-            count,
-            retries,
-            retry_delay,
-        )
+        return count, retries, retry_delay
 
     def build_command(
         self,
@@ -380,13 +375,8 @@ class PoshCopierDashboard:
             str(retry_delay),
         ]
 
-        if (
-            self.mode_var.get()
-            == "publish"
-        ):
-            command.append(
-                "--publish"
-            )
+        if self.mode_var.get() == "publish":
+            command.append("--publish")
 
         return command
 
@@ -415,10 +405,7 @@ class PoshCopierDashboard:
 
         count, retries, retry_delay = settings
 
-        if (
-            self.mode_var.get()
-            == "publish"
-        ):
+        if self.mode_var.get() == "publish":
             confirmed = messagebox.askyesno(
                 "Confirm Live Publishing",
                 (
@@ -436,6 +423,7 @@ class PoshCopierDashboard:
             retry_delay,
         )
 
+        self.thumbnail_panel.reset()
         self.status_panel.reset()
         self.progress_panel.reset()
 
@@ -519,17 +507,13 @@ class PoshCopierDashboard:
             )
             return
 
-        value = (
-            self.command_input_var.get().strip()
-        )
+        value = self.command_input_var.get().strip()
 
         if not value:
             return
 
         try:
-            process.stdin.write(
-                value + "\n"
-            )
+            process.stdin.write(value + "\n")
             process.stdin.flush()
 
             self.activity_log.append(
@@ -556,9 +540,7 @@ class PoshCopierDashboard:
 
         try:
             for line in process.stdout:
-                self.output_queue.put(
-                    line
-                )
+                self.output_queue.put(line)
         finally:
             return_code = process.wait()
 
@@ -566,7 +548,6 @@ class PoshCopierDashboard:
                 f"\n[Process exited with code "
                 f"{return_code}]\n"
             )
-
             self.output_queue.put(
                 "__PROCESS_FINISHED__"
             )
@@ -625,6 +606,11 @@ class PoshCopierDashboard:
 
         if key == "TITLE":
             self.status_panel.set_title(
+                value
+            )
+
+        elif key == "LISTING_ID":
+            self.thumbnail_panel.show_listing(
                 value
             )
 

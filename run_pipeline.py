@@ -812,6 +812,10 @@ def run_pipeline(
                     str(listing.get("title", "")),
                 )
                 emit_status(
+                    "LISTING_ID",
+                    listing_id,
+)
+                emit_status(
                     "PRICE",
                     str(listing.get("price", "")),
                 )
