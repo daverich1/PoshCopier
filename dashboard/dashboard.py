@@ -10,6 +10,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from dashboard.activity_log import ActivityLog
+from dashboard.inventory_panel import InventoryPanel
 from dashboard.controls import ControlsPanel
 from dashboard.pipeline_io import (
     StatusEvent,
@@ -94,12 +95,36 @@ class PoshCopierDashboard:
             anchor="w",
             pady=(0, 14),
         )
+        notebook = ttk.Notebook(
+            main
+        )
+        notebook.pack(
+            fill="both",
+            expand=True,
+        )
 
+        pipeline_tab = ttk.Frame(
+            notebook,
+            padding=0,
+        )
+        inventory_tab = ttk.Frame(
+            notebook,
+            padding=0,
+        )
+
+        notebook.add(
+            pipeline_tab,
+            text="Pipeline",
+        )
+        notebook.add(
+            inventory_tab,
+            text="Inventory",
+        )
         settings = ttk.LabelFrame(
-            main,
+            pipeline_tab,
             text="Run Settings",
             padding=12,
-        )
+)
         settings.pack(fill="x")
 
         settings.columnconfigure(1, weight=1)
@@ -208,7 +233,7 @@ class PoshCopierDashboard:
         )
 
         self.controls = ControlsPanel(
-            main,
+            pipeline_tab,
             on_start=self.start_pipeline,
             on_pause=self.pause_pipeline,
             on_resume=self.resume_pipeline,
@@ -222,7 +247,7 @@ class PoshCopierDashboard:
             pady=12,
         )
 
-        upper_content = ttk.Frame(main)
+        upper_content = ttk.Frame(pipeline_tab)
         upper_content.pack(
             fill="x",
             pady=(0, 12),
@@ -257,7 +282,7 @@ class PoshCopierDashboard:
         )
 
         self.progress_panel = ProgressPanel(
-            main
+            pipeline_tab
         )
         self.progress_panel.pack(
             fill="x",
@@ -265,7 +290,7 @@ class PoshCopierDashboard:
         )
 
         input_frame = ttk.LabelFrame(
-            main,
+            pipeline_tab,
             text="Pipeline Input",
             padding=10,
         )
@@ -321,12 +346,19 @@ class PoshCopierDashboard:
             pady=(6, 0),
         )
 
-        self.activity_log = ActivityLog(main)
+        self.activity_log = ActivityLog(pipeline_tab)
         self.activity_log.pack(
             fill="both",
             expand=True,
         )
-
+        self.inventory_panel = InventoryPanel(
+            inventory_tab
+        )
+        self.inventory_panel.pack(
+            fill="both",
+            expand=True,
+        )
+        
     def validate_settings(
         self,
     ) -> tuple[int, int, float] | None:
