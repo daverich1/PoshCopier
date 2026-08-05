@@ -9,7 +9,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 from urllib.parse import urlsplit
-
+from resume_state import (
+    add_completed_listing,
+    clear_resume_state,
+    completed_listing_ids,
+    load_resume_state,
+    save_resume_state,
+)
 from playwright.sync_api import Page, sync_playwright
 
 from data.database.database import (
@@ -223,8 +229,30 @@ def get_listing_json_path(listing_id: str) -> Path:
 def select_source_candidates(
     available: list[dict[str, Any]],
     count: int,
+    completed_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
+    completed_ids = completed_ids or set()
+
+    for item in available:
+        listing_id = str(
+            item["listing_id"]
+        )
+
+        if listing_id in completed_ids:
+            continue
+
+        if listing_already_copied(
+            listing_id
+        ):
+            continue
+
+        selected.append(item)
+
+        if len(selected) >= count:
+            break
+
+    return selected
 
     for item in available:
         listing_id = str(item["listing_id"])
@@ -520,9 +548,26 @@ def run_pipeline(
         discovery_file
     )
 
+    state = load_resume_state()
+    completed_ids = completed_listing_ids()
+
+    if state:
+        print()
+        print("Resume checkpoint found.")
+        print(
+            "Previously processed:",
+            state.get("processed", 0),
+        )
+        print(
+            "Last listing:",
+            state.get("last_listing_id", ""),
+        )
+        print()
+
     candidates = select_source_candidates(
         available,
         count,
+        completed_ids,
     )
 
     print("=" * 72)
@@ -697,6 +742,33 @@ def run_pipeline(
                 except Exception:
                     upload_failed += 1
 
+                    add_completed_listing(
+                        listing_id
+                    )
+
+                    save_resume_state(
+                        mode=(
+                            "live_publish"
+                            if publish
+                            else "dry_run"
+                        ),
+                        requested_count=count,
+                        processed=index,
+                        uploaded=uploaded,
+                        existing=existing,
+                        unavailable=unavailable,
+                        failed=upload_failed,
+                        already_recorded=already_recorded,
+                        would_upload=would_upload,
+                        last_listing_id=listing_id,
+                        last_listing_title=str(
+                            listing.get(
+                                "title",
+                                "",
+                            )
+                        ),
+                    )
+
                 print_progress(
                     processed=index,
                     total=total,
@@ -736,6 +808,11 @@ def run_pipeline(
         ERRORS_DIR,
     )
     print("=" * 72)
+    if clear_resume_state():
+        print(
+            "Resume checkpoint cleared "
+            "because the run completed normally."
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
