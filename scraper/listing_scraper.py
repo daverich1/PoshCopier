@@ -19,6 +19,7 @@ from scraper.parser import (
     extract_size,
 )
 from scraper.save_listing import save_listing
+from scraper.size_extractor import extract_sizes
 
 
 JSONLD_CONDITION_MAP = {
@@ -328,7 +329,30 @@ def extract_condition_from_jsonld(
 
     return None
 
+def extract_description_from_jsonld(
+    page: Page,
+) -> str | None:
+    products = extract_jsonld_products(
+        page
+    )
 
+    for product in products:
+        description = product.get(
+            "description"
+        )
+
+        if isinstance(
+            description,
+            str,
+        ):
+            description = (
+                description.strip()
+            )
+
+            if description:
+                return description
+
+    return None
 def scrape_listing(
     page: Page,
     listing_url: str,
@@ -384,10 +408,8 @@ def scrape_listing(
     )
 
     if condition is None:
-        condition = (
-            extract_condition_from_jsonld(
-                page
-            )
+        condition = extract_condition_from_jsonld(
+            page
         )
 
         if condition:
@@ -396,6 +418,39 @@ def scrape_listing(
                 condition,
             )
 
+    sizes = extract_sizes(
+        page
+    )
+
+    fallback_size = extract_size(
+        lines
+    )
+
+    primary_size = (
+        sizes[0]
+        if sizes
+        else fallback_size
+    )
+
+    print(
+        "Sizes detected:",
+        sizes,
+    )
+    description = extract_description(
+        lines
+    )
+
+    if description is None:
+        description = (
+            extract_description_from_jsonld(
+                page
+            )
+        )
+
+        if description:
+            print(
+                "Description recovered from JSON-LD."
+            )
     listing = {
         "url": clean_listing_url(
             listing_url
@@ -410,8 +465,10 @@ def scrape_listing(
             lines,
             title,
         ),
-        "size": extract_size(
-            lines
+        "size": primary_size,
+        "sizes": sizes,
+        "is_multi_size": (
+            len(sizes) > 1
         ),
         "condition": condition,
         "category": extract_category(
@@ -420,9 +477,7 @@ def scrape_listing(
         "colors": extract_colors(
             lines
         ),
-        "description": extract_description(
-            lines
-        ),
+        "description": description,
         "image_urls": image_urls,
         "local_images": [],
         "available": availability.available,

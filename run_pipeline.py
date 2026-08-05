@@ -56,6 +56,8 @@ from uploader.listing_loader import (
 from uploader.publisher import publish_listing
 from uploader.size import fill_size
 
+from uploader.multi_size import fill_multi_size_inventory
+
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DISCOVERY_FILE = PROJECT_DIR / "downloads" / "discovered_listings.json"
@@ -367,7 +369,16 @@ def fill_listing_form(
     close_price_modal(page)
     fill_brand(page, listing["brand"])
     fill_category(page, listing["category"])
-    fill_size(page, listing["size"])
+    if listing.get("is_multi_size"):
+        fill_multi_size_inventory(
+            page,
+            listing,
+        )
+    else:
+        fill_size(
+            page,
+            listing["size"],
+        )
     fill_condition(page, listing["condition"])
     fill_colors(page, listing.get("colors", []))
 
