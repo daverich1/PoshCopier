@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 from inventory.inventory_item import InventoryItem
 from inventory.inventory_manager import InventoryManager
 from inventory.thumbnail_cache import ThumbnailCache
+from dashboard.listing_editor import ListingEditor
 
 
 class InventoryPanel(ttk.LabelFrame):
@@ -365,6 +366,17 @@ class InventoryPanel(ttk.LabelFrame):
             side="left",
             padx=(8, 0),
         )
+
+        self.edit_button = ttk.Button(
+            actions,
+            text="Edit Listing",
+            command=self.edit_selected_listing,
+            state="disabled",
+        )
+        self.edit_button.pack(
+            side="left",
+            padx=(8, 0),
+        )
     def _add_detail_row(
         self,
         parent: ttk.Frame,
@@ -619,6 +631,9 @@ class InventoryPanel(ttk.LabelFrame):
         self.open_json_button.configure(
             state=state
         )
+        self.edit_button.configure(
+            state=state
+        )
 
     def open_selected_folder(self) -> None:
         item = self.selected_item
@@ -653,6 +668,25 @@ class InventoryPanel(ttk.LabelFrame):
             return
 
         self._open_path(json_file)
+
+
+    def edit_selected_listing(self) -> None:
+        item = self.selected_item
+
+        if item is None:
+            return
+
+        try:
+            ListingEditor(
+                self,
+                item,
+                on_saved=self.refresh,
+            )
+        except Exception as error:
+            messagebox.showerror(
+                "Editor Failed",
+                str(error),
+            )
 
     def _open_path(
         self,
