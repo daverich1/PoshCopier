@@ -8,8 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
-DOWNLOADS_DIR = PROJECT_DIR / "downloads"
+from runtime_paths import DOWNLOADS_DIR
 
 
 def utc_now() -> str:
