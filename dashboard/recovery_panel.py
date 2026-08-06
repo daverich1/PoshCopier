@@ -5,12 +5,13 @@ import subprocess
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from inventory.recovery_manager import (
     RecoveryItem,
     RecoveryManager,
 )
+from inventory.repair_engine import RepairEngine
 
 
 class RecoveryPanel(ttk.LabelFrame):
@@ -25,6 +26,7 @@ class RecoveryPanel(ttk.LabelFrame):
         )
 
         self.manager = RecoveryManager()
+        self.repair_engine = RepairEngine()
         self.items: list[RecoveryItem] = []
         self.selected_item: RecoveryItem | None = None
 
@@ -298,6 +300,17 @@ class RecoveryPanel(ttk.LabelFrame):
             padx=(8, 0),
         )
 
+        self.repair_button = ttk.Button(
+            actions,
+            text="Repair Listing",
+            command=self.repair_selected_folder,
+            state="disabled",
+        )
+        self.repair_button.pack(
+            side="left",
+            padx=(8, 0),
+        )
+
     def _add_detail_row(
         self,
         parent: ttk.Frame,
@@ -420,6 +433,13 @@ class RecoveryPanel(ttk.LabelFrame):
                 else "disabled"
             ),
         )
+        self.repair_button.configure(
+            state=(
+                "normal"
+                if item.problem == "Missing listing.json"
+                else "disabled"
+            ),
+        )
 
     def _clear_selection(self) -> None:
         self.selected_item = None
@@ -436,6 +456,9 @@ class RecoveryPanel(ttk.LabelFrame):
             state="disabled",
         )
         self.delete_button.configure(
+            state="disabled",
+        )
+        self.repair_button.configure(
             state="disabled",
         )
 
@@ -504,6 +527,76 @@ class RecoveryPanel(ttk.LabelFrame):
         )
 
         self.refresh()
+
+    def repair_selected_folder(self) -> None:
+        item = self.selected_item
+
+        if item is None:
+            return
+
+        if item.problem != "Missing listing.json":
+            messagebox.showwarning(
+                "Repair Not Supported",
+                (
+                    f"Cannot repair: {item.problem}.\n\n"
+                    "Only folders with 'Missing listing.json' "
+                    "can be repaired."
+                ),
+            )
+            return
+
+        confirmed = messagebox.askyesno(
+            "Repair Listing",
+            (
+                f"Attempt to repair this folder?\n\n"
+                f"{item.folder_path}\n\n"
+                "This will regenerate listing.json by scraping "
+                "the source URL. Existing images will be preserved."
+            ),
+        )
+
+        if not confirmed:
+            return
+
+        # Try repair without URL first (let RepairEngine auto-discover)
+        success, message = self.repair_engine.repair(item, None)
+
+        # If repair failed due to missing URL, prompt user
+        if not success and "No source URL available" in message:
+            source_url = simpledialog.askstring(
+                "Source URL Required",
+                (
+                    "Could not auto-discover source URL.\n\n"
+                    "Enter the source URL to scrape:\n"
+                    "(e.g., https://poshmark.com/listing/...)"
+                ),
+                parent=self,
+            )
+
+            if not source_url or not source_url.strip():
+                messagebox.showinfo(
+                    "Repair Cancelled",
+                    "No source URL provided. Repair cancelled.",
+                )
+                return
+
+            # Retry repair with user-provided URL
+            success, message = self.repair_engine.repair(
+                item,
+                source_url.strip(),
+            )
+
+        if success:
+            messagebox.showinfo(
+                "Repair Successful",
+                message,
+            )
+            self.refresh()
+        else:
+            messagebox.showerror(
+                "Repair Failed",
+                message,
+            )
 
     def _open_path(
         self,

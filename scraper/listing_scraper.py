@@ -353,6 +353,52 @@ def extract_description_from_jsonld(
                 return description
 
     return None
+def extract_category_from_breadcrumb(page: Page) -> str | None:
+    """
+    Extract category from breadcrumb navigation.
+    
+    Converts breadcrumb like "Women > Shoes > Espadrilles"
+    to "WomenShoesEspadrilles"
+    
+    Preserves spaces within category names:
+    "Women > Shoes > Ankle Boots & Booties"
+    to "WomenShoesAnkle Boots & Booties"
+    
+    Returns:
+        Category string with separators removed, or None if not found
+    """
+    try:
+        # Semantic selectors for breadcrumb navigation
+        breadcrumb_selectors = [
+            'nav[aria-label*="breadcrumb" i]',
+            '[aria-label*="breadcrumb" i]',
+            '[data-test="breadcrumb"]',
+        ]
+        
+        for selector in breadcrumb_selectors:
+            try:
+                breadcrumb = page.locator(selector).first
+                if breadcrumb.count() > 0:
+                    text = breadcrumb.inner_text()
+                    
+                    # Normalize separators: >, /, ›, •
+                    normalized = text.replace('>', '|').replace('/', '|').replace('›', '|').replace('•', '|')
+                    parts = [part.strip() for part in normalized.split('|') if part.strip()]
+                    
+                    # Only accept if at least 2 meaningful parts
+                    if len(parts) >= 2:
+                        # Join without separators, preserving spaces within names
+                        return ''.join(parts)
+                        
+            except Exception:
+                continue
+        
+        return None
+        
+    except Exception:
+        return None
+
+
 def scrape_listing(
     page: Page,
     listing_url: str,
@@ -471,8 +517,9 @@ def scrape_listing(
             len(sizes) > 1
         ),
         "condition": condition,
-        "category": extract_category(
-            lines
+        "category": (
+            extract_category_from_breadcrumb(page)
+            or extract_category(lines)
         ),
         "colors": extract_colors(
             lines
