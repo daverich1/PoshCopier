@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 from inventory.inventory_item import InventoryItem
 from inventory.inventory_manager import InventoryManager
 from inventory.thumbnail_cache import ThumbnailCache
+from inventory.upload_queue import UploadQueueManager
 from dashboard.listing_editor import ListingEditor
 from dashboard.upload_dialog import UploadDialog
 
@@ -26,6 +27,7 @@ class InventoryPanel(ttk.LabelFrame):
         )
 
         self.manager = InventoryManager()
+        self.queue_manager = UploadQueueManager()
         self.thumbnail_cache = ThumbnailCache(
             size=(180, 180)
         )
@@ -76,7 +78,7 @@ class InventoryPanel(ttk.LabelFrame):
             weight=1,
         )
         self.rowconfigure(
-            1,
+            2,
             weight=1,
         )
 
@@ -171,12 +173,49 @@ class InventoryPanel(ttk.LabelFrame):
             sticky="e",
         )
 
+        # Queue action buttons
+        queue_toolbar = ttk.Frame(self)
+        queue_toolbar.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            pady=(0, 8),
+        )
+
+        self.add_to_queue_button = ttk.Button(
+            queue_toolbar,
+            text="Add to Queue",
+            command=self._add_to_queue,
+            state="disabled",
+        )
+        self.add_to_queue_button.pack(
+            side="left",
+            padx=(0, 8),
+        )
+
+        ttk.Button(
+            queue_toolbar,
+            text="Select All Ready",
+            command=self._select_all_ready,
+        ).pack(
+            side="left",
+            padx=(0, 8),
+        )
+
+        ttk.Button(
+            queue_toolbar,
+            text="Clear Selection",
+            command=self._clear_selection,
+        ).pack(
+            side="left",
+        )
+
         content = ttk.Panedwindow(
             self,
             orient="horizontal",
         )
         content.grid(
-            row=1,
+            row=2,
             column=0,
             sticky="nsew",
         )
@@ -222,7 +261,7 @@ class InventoryPanel(ttk.LabelFrame):
             list_frame,
             columns=columns,
             show="headings",
-            selectmode="browse",
+            selectmode="extended",
         )
 
         self.tree.heading(
@@ -634,18 +673,16 @@ class InventoryPanel(ttk.LabelFrame):
     ) -> None:
         selection = self.tree.selection()
 
-        item_id = (
-            selection[0]
-            if selection
-            else self.tree.focus()
-        )
+        # Update button states based on selection count
+        self._update_button_states()
 
-        if not item_id:
-            return
-
-        self._show_selected_item(
-            item_id
-        )
+        # Show detail only if exactly one item selected
+        if len(selection) == 1:
+            self._show_selected_item(selection[0])
+        elif len(selection) > 1:
+            self._show_multi_selection(len(selection))
+        else:
+            self._clear_preview()
 
     def _show_selected_item(
         self,
@@ -942,25 +979,170 @@ class InventoryPanel(ttk.LabelFrame):
 
         if event.widget is dialog:
             self.upload_dialog = None
-
-    def _open_path(
-        self,
-        path: Path,
-    ) -> None:
-        try:
-            if os.name == "nt":
-                os.startfile(str(path))
-            elif sys.platform == "darwin":
-                subprocess.Popen(
-                    ["open", str(path)]
-                )
-            else:
-                subprocess.Popen(
-                    ["xdg-open", str(path)]
-                )
-        except Exception as error:
-            messagebox.showerror(
-                "Could Not Open",
-                str(error),
+def _open_path(
+    self,
+    path: Path,
+) -> None:
+    try:
+        if os.name == "nt":
+            os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(
+                ["open", str(path)]
             )
+        else:
+            subprocess.Popen(
+                ["xdg-open", str(path)]
+            )
+    except Exception as error:
+        messagebox.showerror(
+            "Could Not Open",
+            str(error),
+        )
+
+# ===== Multi-Select and Queue Methods =====
+
+def _get_selected_items(self) -> list[InventoryItem]:
+    """Get InventoryItems for all selected tree rows."""
+    selection = self.tree.selection()
+    items: list[InventoryItem] = []
+    
+    for item_id in selection:
+        try:
+            index = int(item_id)
+            item = self.filtered_items[index]
+            items.append(item)
+        except (ValueError, IndexError):
+            continue
+    
+    return items
+
+def _add_to_queue(self) -> None:
+    """Add selected items to upload queue."""
+    selected_items = self._get_selected_items()
+    
+    if not selected_items:
+        messagebox.showwarning(
+            "No Selection",
+            "Please select one or more listings to add to the queue.",
+        )
+        return
+    
+    # Add items to queue
+    added_count, errors = self.queue_manager.add_items(selected_items)
+    
+    # Count items by status
+    selected_count = len(selected_items)
+    skipped_count = selected_count - added_count
+    
+    # Build summary message
+    summary_parts = [
+        f"Selected: {selected_count}",
+        f"Added to queue: {added_count}",
+        f"Skipped: {skipped_count}",
+    ]
+    
+    if errors:
+        summary_parts.append("\nReasons:")
+        for error in errors[:10]:  # Limit to first 10 errors
+            summary_parts.append(f"  • {error}")
+        
+        if len(errors) > 10:
+            summary_parts.append(f"  ... and {len(errors) - 10} more")
+    
+    summary = "\n".join(summary_parts)
+    
+    # Show appropriate dialog
+    if added_count > 0:
+        messagebox.showinfo(
+            "Added to Queue",
+            summary,
+        )
+    else:
+        messagebox.showwarning(
+            "Nothing Added",
+            summary,
+        )
+    
+    # Refresh inventory view
+    self.refresh()
+
+def _select_all_ready(self) -> None:
+    """Select all Ready items in the tree."""
+    self.tree.selection_remove(*self.tree.selection())
+    
+    ready_ids: list[str] = []
+    
+    for index, item in enumerate(self.filtered_items):
+        if item.ready_for_upload:
+            ready_ids.append(str(index))
+    
+    if ready_ids:
+        self.tree.selection_add(*ready_ids)
+    
+    self._update_button_states()
+
+def _clear_selection(self) -> None:
+    """Clear all tree selections."""
+    self.tree.selection_remove(*self.tree.selection())
+    self._clear_preview()
+    self._update_button_states()
+
+def _update_button_states(self) -> None:
+    """Update button enabled/disabled states based on selection count."""
+    selection = self.tree.selection()
+    selection_count = len(selection)
+    
+    # Add to Queue: enabled when 1+ items selected
+    if selection_count > 0:
+        self.add_to_queue_button.configure(state="normal")
+    else:
+        self.add_to_queue_button.configure(state="disabled")
+    
+    # Single-item actions: enabled only when exactly 1 item selected
+    if selection_count == 1:
+        # Get the selected item to check if it's ready for upload
+        try:
+            index = int(selection[0])
+            item = self.filtered_items[index]
+            
+            self.open_folder_button.configure(state="normal")
+            self.open_json_button.configure(state="normal")
+            self.edit_button.configure(state="normal")
+            
+            # Upload buttons only enabled if ready
+            upload_state = "normal" if item.ready_for_upload else "disabled"
+            self.dry_run_button.configure(state=upload_state)
+            self.upload_button.configure(state=upload_state)
+        except (ValueError, IndexError):
+            self._disable_single_item_buttons()
+    else:
+        self._disable_single_item_buttons()
+
+def _disable_single_item_buttons(self) -> None:
+    """Disable all single-item action buttons."""
+    self.open_folder_button.configure(state="disabled")
+    self.open_json_button.configure(state="disabled")
+    self.edit_button.configure(state="disabled")
+    self.dry_run_button.configure(state="disabled")
+    self.upload_button.configure(state="disabled")
+
+def _show_multi_selection(self, count: int) -> None:
+    """Show multi-selection summary in detail panel."""
+    self.selected_item = None
+    self.preview_photo = None
+    
+    self.image_label.configure(
+        image="",
+        text="Multiple items selected",
+    )
+    
+    self.title_var.set(f"{count} listings selected")
+    self.brand_var.set("—")
+    self.price_var.set("—")
+    self.size_var.set("—")
+    self.category_var.set("—")
+    self.health_var.set("—")
+    self.status_var.set("—")
+
 
