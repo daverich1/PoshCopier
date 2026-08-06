@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from inventory.inventory_item import InventoryItem
+from inventory.inventory_health import InventoryHealth
 from runtime_paths import DOWNLOADS_DIR
 
 
@@ -14,6 +15,9 @@ class InventoryManager:
         downloads_dir: Path = DOWNLOADS_DIR,
     ) -> None:
         self.downloads_dir = downloads_dir
+        self.health = InventoryHealth(
+            downloads_dir
+)
 
     def load_items(
         self,
@@ -142,7 +146,9 @@ class InventoryManager:
                 False,
             )
         )
-
+        report = self.health.scan_listing(
+            listing_dir
+)
         return InventoryItem(
             listing_id=listing_id,
             title=title,
@@ -155,6 +161,14 @@ class InventoryManager:
             uploaded=uploaded,
             duplicate=duplicate,
             failed=failed,
+
+            health_status=report.status,
+            ready_for_upload=report.ready_for_upload,
+            health_messages=list(
+                self.health.problem_messages(
+                    report
+                )
+            ),
         )
 
     def _format_sizes(

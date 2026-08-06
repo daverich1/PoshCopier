@@ -11,6 +11,7 @@ from inventory.inventory_item import InventoryItem
 from inventory.inventory_manager import InventoryManager
 from inventory.thumbnail_cache import ThumbnailCache
 from dashboard.listing_editor import ListingEditor
+from dashboard.upload_dialog import UploadDialog
 
 
 class InventoryPanel(ttk.LabelFrame):
@@ -36,6 +37,9 @@ class InventoryPanel(ttk.LabelFrame):
         self.count_var = tk.StringVar(
             value="0 listings"
         )
+        self.health_filter_var = tk.StringVar(
+            value="All"
+        )
 
         self.title_var = tk.StringVar(
             value="Select a listing"
@@ -55,9 +59,13 @@ class InventoryPanel(ttk.LabelFrame):
         self.status_var = tk.StringVar(
             value="—"
         )
+        self.health_var = tk.StringVar(
+            value="—"
+        )
 
         self.preview_photo = None
         self.selected_item: InventoryItem | None = None
+        self.upload_dialog: UploadDialog | None = None
 
         self._build_interface()
         self.refresh()
@@ -111,13 +119,46 @@ class InventoryPanel(ttk.LabelFrame):
             self._on_search_changed,
         )
 
+        ttk.Label(
+            toolbar,
+            text="Health:",
+        ).grid(
+            row=0,
+            column=2,
+            sticky="e",
+            padx=(8, 8),
+        )
+
+        self.health_filter = ttk.Combobox(
+            toolbar,
+            textvariable=self.health_filter_var,
+            values=(
+                "All",
+                "Ready",
+                "Needs Attention",
+                "Broken",
+            ),
+            state="readonly",
+            width=18,
+        )
+        self.health_filter.grid(
+            row=0,
+            column=3,
+            sticky="w",
+            padx=(0, 8),
+        )
+        self.health_filter.bind(
+            "<<ComboboxSelected>>",
+            self._on_health_filter_changed,
+        )
+
         ttk.Button(
             toolbar,
             text="Refresh",
             command=self.refresh,
         ).grid(
             row=0,
-            column=2,
+            column=4,
             padx=(0, 8),
         )
 
@@ -126,7 +167,7 @@ class InventoryPanel(ttk.LabelFrame):
             textvariable=self.count_var,
         ).grid(
             row=0,
-            column=3,
+            column=5,
             sticky="e",
         )
 
@@ -169,6 +210,7 @@ class InventoryPanel(ttk.LabelFrame):
         )
 
         columns = (
+            "health",
             "title",
             "brand",
             "price",
@@ -183,6 +225,10 @@ class InventoryPanel(ttk.LabelFrame):
             selectmode="browse",
         )
 
+        self.tree.heading(
+            "health",
+            text="Health",
+        )
         self.tree.heading(
             "title",
             text="Title",
@@ -205,8 +251,13 @@ class InventoryPanel(ttk.LabelFrame):
         )
 
         self.tree.column(
+            "health",
+            width=125,
+            anchor="center",
+        )
+        self.tree.column(
             "title",
-            width=330,
+            width=300,
             anchor="w",
         )
         self.tree.column(
@@ -337,6 +388,12 @@ class InventoryPanel(ttk.LabelFrame):
         self._add_detail_row(
             details,
             4,
+            "Health:",
+            self.health_var,
+        )
+        self._add_detail_row(
+            details,
+            5,
             "Status:",
             self.status_var,
         )
@@ -382,6 +439,28 @@ class InventoryPanel(ttk.LabelFrame):
             side="left",
             padx=(8, 0),
         )
+
+        self.dry_run_button = ttk.Button(
+            actions,
+            text="Dry Run Selected",
+            command=self.dry_run_selected_listing,
+            state="disabled",
+        )
+        self.dry_run_button.pack(
+            side="left",
+            padx=(8, 0),
+        )
+
+        self.upload_button = ttk.Button(
+            actions,
+            text="Upload This Listing",
+            command=self.upload_selected_listing,
+            state="disabled",
+        )
+        self.upload_button.pack(
+            side="left",
+            padx=(8, 0),
+        )
     def _add_detail_row(
         self,
         parent: ttk.Frame,
@@ -423,30 +502,43 @@ class InventoryPanel(ttk.LabelFrame):
     ) -> None:
         self._apply_filter()
 
+    def _on_health_filter_changed(
+        self,
+        _event=None,
+    ) -> None:
+        self._apply_filter()
+
     def _apply_filter(self) -> None:
         query = self.search_var.get().strip().lower()
+        health_filter = self.health_filter_var.get().strip()
 
-        if not query:
-            self.filtered_items = list(
-                self.items
-            )
-        else:
-            self.filtered_items = [
-                item
-                for item in self.items
-                if query
-                in " ".join(
-                    (
-                        item.title,
-                        item.brand,
-                        item.price,
-                        item.size,
-                        item.category,
-                        item.listing_id,
-                    )
-                ).lower()
-            ]
+        filtered: list[InventoryItem] = []
 
+        for item in self.items:
+            if (
+                health_filter != "All"
+                and item.health_status != health_filter
+            ):
+                continue
+
+            searchable_text = " ".join(
+                (
+                    item.title,
+                    item.brand,
+                    item.price,
+                    item.size,
+                    item.category,
+                    item.listing_id,
+                    item.health_status,
+                )
+            ).lower()
+
+            if query and query not in searchable_text:
+                continue
+
+            filtered.append(item)
+
+        self.filtered_items = filtered
         self._populate_tree()
 
     def _populate_tree(self) -> None:
@@ -463,6 +555,7 @@ class InventoryPanel(ttk.LabelFrame):
                 "end",
                 iid=str(index),
                 values=(
+                    self._health_text(item),
                     item.title,
                     item.brand,
                     item.price,
@@ -482,6 +575,21 @@ class InventoryPanel(ttk.LabelFrame):
         )
 
         self._clear_preview()
+
+    def _health_text(
+        self,
+        item: InventoryItem,
+    ) -> str:
+        if item.health_status == "Ready":
+            return "Ready"
+
+        if item.health_status == "Needs Attention":
+            return "Needs Attention"
+
+        if item.health_status == "Broken":
+            return "Broken"
+
+        return item.health_status or "Unknown"
 
     def _status_text(
         self,
@@ -580,6 +688,9 @@ class InventoryPanel(ttk.LabelFrame):
         self.category_var.set(
             item.category or "—"
         )
+        self.health_var.set(
+            item.health_status
+        )
         self.status_var.set(
             self._status_text(item)
         )
@@ -601,9 +712,12 @@ class InventoryPanel(ttk.LabelFrame):
                 text="",
             )
 
-        self._set_action_state(
-            enabled=True
-        )
+        self.open_folder_button.configure(state="normal")
+        self.open_json_button.configure(state="normal")
+        self.edit_button.configure(state="normal")
+        upload_state = "normal" if item.ready_for_upload else "disabled"
+        self.dry_run_button.configure(state=upload_state)
+        self.upload_button.configure(state=upload_state)
 
     def _clear_preview(self) -> None:
         self.selected_item = None
@@ -621,6 +735,7 @@ class InventoryPanel(ttk.LabelFrame):
         self.price_var.set("—")
         self.size_var.set("—")
         self.category_var.set("—")
+        self.health_var.set("—")
         self.status_var.set("—")
 
     def _set_action_state(
@@ -637,6 +752,12 @@ class InventoryPanel(ttk.LabelFrame):
             state=state
         )
         self.edit_button.configure(
+            state=state
+        )
+        self.dry_run_button.configure(
+            state=state
+        )
+        self.upload_button.configure(
             state=state
         )
 
@@ -715,6 +836,112 @@ class InventoryPanel(ttk.LabelFrame):
                 "Editor Failed",
                 str(error),
             )
+
+
+    def dry_run_selected_listing(self) -> None:
+        self._open_upload_dialog(
+            mode="dry_run"
+        )
+
+    def upload_selected_listing(self) -> None:
+        self._open_upload_dialog(
+            mode="publish"
+        )
+
+    def _open_upload_dialog(
+        self,
+        *,
+        mode: str,
+    ) -> None:
+        item = self.selected_item
+
+        if item is None:
+            return
+
+        existing_dialog = self.upload_dialog
+
+        if (
+            existing_dialog is not None
+            and existing_dialog.winfo_exists()
+        ):
+            existing_dialog.lift()
+            existing_dialog.focus_force()
+            return
+
+        try:
+            dialog = UploadDialog(
+                self,
+                item,
+                on_finished=self._on_upload_finished,
+            )
+        except Exception as error:
+            messagebox.showerror(
+                "Upload Dialog Failed",
+                str(error),
+            )
+            return
+
+        self.upload_dialog = dialog
+        dialog.mode_var.set(
+            mode
+        )
+
+        dialog.bind(
+            "<Destroy>",
+            self._on_upload_dialog_destroyed,
+            add="+",
+        )
+
+    def _on_upload_finished(self) -> None:
+        current_listing_id = (
+            self.selected_item.listing_id
+            if self.selected_item is not None
+            else None
+        )
+
+        self.items = self.manager.load_items()
+        self._apply_filter()
+
+        if current_listing_id is None:
+            return
+
+        for index, item in enumerate(
+            self.filtered_items
+        ):
+            if item.listing_id != current_listing_id:
+                continue
+
+            tree_id = str(index)
+
+            if self.tree.exists(
+                tree_id
+            ):
+                self.tree.selection_set(
+                    tree_id
+                )
+                self.tree.focus(
+                    tree_id
+                )
+                self.tree.see(
+                    tree_id
+                )
+                self._show_selected_item(
+                    tree_id
+                )
+
+            break
+
+    def _on_upload_dialog_destroyed(
+        self,
+        event,
+    ) -> None:
+        dialog = self.upload_dialog
+
+        if dialog is None:
+            return
+
+        if event.widget is dialog:
+            self.upload_dialog = None
 
     def _open_path(
         self,

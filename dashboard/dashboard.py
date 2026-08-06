@@ -11,6 +11,7 @@ from tkinter import messagebox, ttk
 
 from dashboard.activity_log import ActivityLog
 from dashboard.inventory_panel import InventoryPanel
+from dashboard.recovery_panel import RecoveryPanel
 from dashboard.controls import ControlsPanel
 from dashboard.pipeline_io import (
     StatusEvent,
@@ -111,6 +112,10 @@ class PoshCopierDashboard:
             notebook,
             padding=0,
         )
+        recovery_tab = ttk.Frame(
+            notebook,
+            padding=0,
+        )
 
         notebook.add(
             pipeline_tab,
@@ -119,6 +124,10 @@ class PoshCopierDashboard:
         notebook.add(
             inventory_tab,
             text="Inventory",
+        )
+        notebook.add(
+            recovery_tab,
+            text="Recovery",
         )
         settings = ttk.LabelFrame(
             pipeline_tab,
@@ -355,6 +364,14 @@ class PoshCopierDashboard:
             inventory_tab
         )
         self.inventory_panel.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.recovery_panel = RecoveryPanel(
+            recovery_tab
+        )
+        self.recovery_panel.pack(
             fill="both",
             expand=True,
         )

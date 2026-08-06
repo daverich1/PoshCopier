@@ -28,8 +28,8 @@ class ListingEditor(tk.Toplevel):
         self.title(
             f"Edit Listing - {item.title or item.listing_id}"
         )
-        self.geometry("760x720")
-        self.minsize(680, 620)
+        self.geometry("760x760")
+        self.minsize(680, 660)
         self.transient(parent)
         self.grab_set()
 
@@ -54,6 +54,11 @@ class ListingEditor(tk.Toplevel):
         self.category_var = tk.StringVar(
             value=str(
                 self.payload.get("category", "")
+            )
+        )
+        self.condition_var = tk.StringVar(
+            value=str(
+                self.payload.get("condition", "")
             )
         )
         self.status_var = tk.StringVar(
@@ -86,7 +91,7 @@ class ListingEditor(tk.Toplevel):
             weight=1,
         )
         main.rowconfigure(
-            6,
+            7,
             weight=1,
         )
 
@@ -135,10 +140,41 @@ class ListingEditor(tk.Toplevel):
 
         ttk.Label(
             main,
-            text="Description:",
+            text="Condition:",
             font=("Segoe UI", 9, "bold"),
         ).grid(
             row=6,
+            column=0,
+            sticky="w",
+            padx=(0, 10),
+            pady=5,
+        )
+
+        self.condition_combo = ttk.Combobox(
+            main,
+            textvariable=self.condition_var,
+            values=(
+                "New with tags",
+                "New without tags",
+                "Like new",
+                "Good",
+                "Fair",
+            ),
+            state="normal",
+        )
+        self.condition_combo.grid(
+            row=6,
+            column=1,
+            sticky="ew",
+            pady=5,
+        )
+
+        ttk.Label(
+            main,
+            text="Description:",
+            font=("Segoe UI", 9, "bold"),
+        ).grid(
+            row=7,
             column=0,
             sticky="nw",
             padx=(0, 10),
@@ -149,7 +185,7 @@ class ListingEditor(tk.Toplevel):
             main
         )
         description_frame.grid(
-            row=6,
+            row=7,
             column=1,
             sticky="nsew",
             pady=(6, 0),
@@ -204,7 +240,7 @@ class ListingEditor(tk.Toplevel):
             main
         )
         actions.grid(
-            row=7,
+            row=8,
             column=0,
             columnspan=2,
             sticky="ew",
@@ -334,6 +370,7 @@ class ListingEditor(tk.Toplevel):
         price = self.price_var.get().strip()
         size = self.size_var.get().strip()
         category = self.category_var.get().strip()
+        condition = self.condition_var.get().strip()
         description = self.description_text.get(
             "1.0",
             "end-1c",
@@ -347,6 +384,7 @@ class ListingEditor(tk.Toplevel):
                 ("Price", price),
                 ("Brand", brand),
                 ("Category", category),
+                ("Condition", condition),
                 ("Size", size),
             )
             if not value
@@ -364,6 +402,7 @@ class ListingEditor(tk.Toplevel):
             "price": price,
             "size": size,
             "category": category,
+            "condition": condition,
             "description": description,
         }
 
@@ -386,6 +425,7 @@ class ListingEditor(tk.Toplevel):
         updated_payload["brand"] = values["brand"]
         updated_payload["price"] = values["price"]
         updated_payload["category"] = values["category"]
+        updated_payload["condition"] = values["condition"]
         updated_payload["description"] = values["description"]
 
         parsed_sizes = [
