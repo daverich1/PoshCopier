@@ -261,6 +261,11 @@ class InventoryPanel(ttk.LabelFrame):
             self._on_tree_click,
         )
 
+        self.tree.bind(
+            "<Double-1>",
+            self._on_item_double_click,
+        )
+
         detail_frame.columnconfigure(
             0,
             weight=1,
@@ -669,7 +674,30 @@ class InventoryPanel(ttk.LabelFrame):
 
         self._open_path(json_file)
 
+    def _on_item_double_click(
+        self,
+        event,
+    ) -> None:
+        item_id = self.tree.identify_row(
+            event.y
+        )
 
+        if not item_id:
+            return
+
+        self.tree.selection_set(
+            item_id
+        )
+        self.tree.focus(
+            item_id
+        )
+
+        self._show_selected_item(
+            item_id
+        )
+
+        self.edit_selected_listing()
+        
     def edit_selected_listing(self) -> None:
         item = self.selected_item
 
