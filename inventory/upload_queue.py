@@ -580,14 +580,26 @@ class UploadQueueManager:
                 counts[status_key] += 1
         
         total = len(self.state.entries)
-        completed = counts["uploaded"] + counts["already_exists"]
+        
+        # Terminal states that count as "completed"
+        terminal_completed = (
+            counts["uploaded"]
+            + counts["already_exists"]
+            + counts["failed"]
+            + counts["skipped"]
+            + counts["cancelled"]
+            + counts["publish_unverified"]
+        )
+        
+        # Remaining = only non-terminal states
         remaining = (
             counts["waiting"]
             + counts["pending"]
             + counts["running"]
         )
         
-        percent = (completed / total * 100.0) if total > 0 else 0.0
+        # Percent = terminal entries / total
+        percent = (terminal_completed / total * 100.0) if total > 0 else 0.0
         
         return {
             "total": total,

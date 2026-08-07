@@ -698,18 +698,28 @@ class UploadQueuePanel(ttk.LabelFrame):
         self._append_output(f"Total processed: {len(results)}")
         self._append_output("")
         
-        # Calculate statistics
+        # Calculate statistics from current run
+        run_uploaded = sum(1 for r in results if r.status == QueueStatus.UPLOADED)
+        run_already_exists = sum(1 for r in results if r.status == QueueStatus.ALREADY_EXISTS)
+        run_skipped = sum(1 for r in results if r.status == QueueStatus.SKIPPED)
+        run_failed = sum(1 for r in results if r.status == QueueStatus.FAILED)
+        run_publish_unverified = sum(1 for r in results if r.status == QueueStatus.PUBLISH_UNVERIFIED)
+        run_cancelled = sum(1 for r in results if r.status == QueueStatus.CANCELLED)
+        
+        # Get cumulative queue summary for remaining count
         summary = self.queue_manager.progress_summary()
         
-        # Show completion dialog
+        # Show completion dialog with current-run statistics
         completion_msg = (
             f"Queue processing complete!\n\n"
-            f"Processed: {len(results)}\n"
-            f"Uploaded: {summary['uploaded']}\n"
-            f"Already Exists: {summary['already_exists']}\n"
-            f"Skipped: {summary['skipped']}\n"
-            f"Failed: {summary['failed']}\n"
-            f"Remaining: {summary['remaining']}"
+            f"Processed this run: {len(results)}\n"
+            f"Uploaded: {run_uploaded}\n"
+            f"Already Exists: {run_already_exists}\n"
+            f"Skipped: {run_skipped}\n"
+            f"Failed: {run_failed}\n"
+            f"Publish Unverified: {run_publish_unverified}\n"
+            f"Cancelled: {run_cancelled}\n\n"
+            f"Queue remaining: {summary['remaining']}"
         )
         
         messagebox.showinfo(
