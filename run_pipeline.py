@@ -43,6 +43,10 @@ from scraper.save_listing import (
 from uploader.category import fill_category
 from uploader.colors import fill_colors
 from uploader.condition import fill_condition
+from uploader.destination_cache import (
+    get_or_refresh_destination_urls,
+    save_cache,
+)
 from uploader.duplicate_detector import (
     add_destination_url,
     collect_destination_listing_urls,
@@ -482,6 +486,8 @@ def process_destination_listing(
     *,
     publish: bool,
 ) -> str:
+    from uploader.publisher import PublishUnverifiedException
+
     listing = load_listing(listing_file)
     listing_id = str(
         listing.get("listing_id", "")
@@ -514,6 +520,12 @@ def process_destination_listing(
             existing_url,
         )
 
+        # Update cache with confirmed duplicate
+        try:
+            save_cache(DESTINATION_CLOSET_URL, destination_urls, full_scan=False)
+        except Exception as e:
+            print(f"Warning: Could not update cache: {e}")
+
         print(
             "Duplicate confirmed. "
             "No new listing was created."
@@ -534,10 +546,20 @@ def process_destination_listing(
     )
 
     emit_status("STEP", "Waiting for Publish Confirmation")
-    destination_url = publish_listing(
-        page,
-        str(listing["title"]),
-    )
+
+    try:
+        destination_url = publish_listing(
+            page,
+            listing,
+            DESTINATION_CLOSET_URL,
+        )
+    except PublishUnverifiedException as e:
+        # Publish button was clicked but verification failed
+        # This is TERMINAL - do not allow retry_operation to retry
+        print(f"\nWARNING: {e}")
+        print("The listing may exist on Poshmark but could not be verified.")
+        print("Check your closet manually before retrying.")
+        return "publish_unverified"
 
     emit_status("STEP", "Recording Completion")
     record_completion(
@@ -549,6 +571,12 @@ def process_destination_listing(
         destination_urls,
         destination_url,
     )
+
+    # Update cache with new listing
+    try:
+        save_cache(DESTINATION_CLOSET_URL, destination_urls, full_scan=False)
+    except Exception as e:
+        print(f"Warning: Could not update cache: {e}")
 
     emit_status("STEP", "Published")
     print("Published destination:", destination_url)
@@ -791,7 +819,7 @@ def run_pipeline(
             )
 
             destination_urls = (
-                collect_destination_listing_urls(
+                get_or_refresh_destination_urls(
                     destination_page,
                     DESTINATION_CLOSET_URL,
                 )

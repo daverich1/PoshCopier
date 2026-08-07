@@ -22,6 +22,7 @@ class UploadQueuePanel(ttk.LabelFrame):
     def __init__(
         self,
         parent: tk.Misc,
+        mode_var: tk.StringVar | None = None,
     ) -> None:
         super().__init__(
             parent,
@@ -30,6 +31,7 @@ class UploadQueuePanel(ttk.LabelFrame):
         )
         
         self.queue_manager = UploadQueueManager()
+        self.mode_var = mode_var  # Reference to dashboard's mode radio button
         
         # Processor state
         self._processor_state = ProcessorState.IDLE
@@ -506,34 +508,51 @@ class UploadQueuePanel(ttk.LabelFrame):
             )
             return
         
-        # Show queue mode
+        # Synchronize queue mode with dashboard radio button
+        if self.mode_var is not None:
+            dashboard_mode = self.mode_var.get()
+            if dashboard_mode in ("dry_run", "publish"):
+                # Update queue state to match dashboard
+                state.mode = dashboard_mode
+                self.queue_manager.save()
+        
         mode = state.mode
-        mode_display = "DRY RUN" if mode == "dry_run" else "PUBLISH"
         
-        # Build confirmation message
-        confirm_msg = (
-            f"Start processing {len(eligible_entries)} entries?\n\n"
-            f"Mode: {mode_display}\n"
-            f"Retry count: {state.retry_count}\n"
-            f"Retry delay: {state.retry_delay}s"
-        )
-        
-        # Add publish warning
+        # Different confirmation flows for dry_run vs publish
         if mode == "publish":
-            confirm_msg += (
-                "\n\n⚠️ WARNING ⚠️\n"
-                "PUBLISH mode will create live Poshmark listings!\n"
-                "This action cannot be undone."
+            # Live Publish requires explicit confirmation
+            confirm_msg = (
+                "Live Publish Confirmation\n\n"
+                "You are about to publish listings to the destination Poshmark closet.\n\n"
+                "This action will create live listings.\n\n"
+                f"Queue items ready to process: {len(eligible_entries)}\n\n"
+                "Continue with Live Publish?"
             )
-        
-        # Ask for confirmation
-        confirmed = messagebox.askyesno(
-            "Start Queue Processing",
-            confirm_msg,
-        )
-        
-        if not confirmed:
-            return
+            
+            confirmed = messagebox.askyesno(
+                "Live Publish Confirmation",
+                confirm_msg,
+                icon="warning",
+            )
+            
+            if not confirmed:
+                return
+        else:
+            # Dry Run mode - simple confirmation
+            confirm_msg = (
+                f"Start Dry Run processing for {len(eligible_entries)} entries?\n\n"
+                f"Retry count: {state.retry_count}\n"
+                f"Retry delay: {state.retry_delay}s\n\n"
+                "Dry Run will NOT create live listings."
+            )
+            
+            confirmed = messagebox.askyesno(
+                "Start Dry Run",
+                confirm_msg,
+            )
+            
+            if not confirmed:
+                return
         
         # Clear stop request flag
         self.queue_manager.reset_stop_request()

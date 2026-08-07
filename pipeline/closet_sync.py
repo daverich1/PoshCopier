@@ -5,8 +5,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Union
 
 from playwright.sync_api import Page, sync_playwright
 
@@ -22,6 +23,46 @@ from scraper.listing_scraper import scrape_listing
 MAX_DOWNLOAD_WORKERS = 2
 BROWSER_HEADLESS = True
 BROWSER_VIEWPORT = {"width": 1440, "height": 1000}
+
+
+class SyncStage(str, Enum):
+    """Enumeration of sync stages."""
+    IDLE = "IDLE"
+    SCANNING = "SCANNING"
+    DOWNLOADING = "DOWNLOADING"
+    BUILDING_INVENTORY = "BUILDING_INVENTORY"
+    QUEUEING = "QUEUEING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+    
+    @property
+    def display_label(self) -> str:
+        """Get user-friendly display label for this stage."""
+        labels = {
+            SyncStage.IDLE: "Idle",
+            SyncStage.SCANNING: "Scanning",
+            SyncStage.DOWNLOADING: "Downloading",
+            SyncStage.BUILDING_INVENTORY: "Building Inventory",
+            SyncStage.QUEUEING: "Queueing",
+            SyncStage.COMPLETE: "Complete",
+            SyncStage.FAILED: "Failed",
+        }
+        return labels.get(self, "Unknown")
+
+
+@dataclass
+class SyncProgress:
+    """Structured progress data for Closet Sync."""
+    stage: SyncStage
+    current: int = 0
+    total: int = 0
+    message: str = ""
+    listing_id: str = ""
+    listing_title: str = ""
+    downloaded: int = 0
+    failed: int = 0
+    queued: int = 0
+    elapsed_seconds: float = 0.0
 
 
 @dataclass
@@ -58,7 +99,7 @@ class ClosetSync:
         source_closet_url: str,
         downloads_dir: Path = DOWNLOADS_DIR,
         source_state_file: Path = SOURCE_STATE_FILE,
-        progress_callback: Callable[[str], None] | None = None,
+        progress_callback: Callable[[Union[str, SyncProgress]], None] | None = None,
         log_file: Path | None = None,
         max_new_listings: int | None = 50,
     ) -> None:
@@ -69,7 +110,7 @@ class ClosetSync:
             source_closet_url: URL of source Poshmark closet
             downloads_dir: Directory for downloaded listings
             source_state_file: Path to Playwright auth state
-            progress_callback: Thread-safe callback for progress updates
+            progress_callback: Thread-safe callback for progress updates (accepts str or SyncProgress)
             log_file: Path to log file (default: logs/closet_sync.log)
             max_new_listings: Maximum new listings to import per sync (default: 50)
         """
@@ -78,6 +119,7 @@ class ClosetSync:
         self.source_state_file = source_state_file
         self.progress_callback = progress_callback
         self.max_new_listings = max_new_listings
+        self.start_time = 0.0
 
         self._setup_logging(log_file)
 
@@ -109,16 +151,30 @@ class ClosetSync:
         listing_file = self.downloads_dir / listing_id / "listing.json"
         return listing_file.exists()
 
-    def _report_progress(self, message: str) -> None:
-        """Report progress via callback and logging."""
+    def _report_progress(self, progress: Union[str, SyncProgress]) -> None:
+        """
+        Report progress via callback and logging.
+        
+        Args:
+            progress: Either a string message (backward compatible) or SyncProgress object
+        """
+        # Extract message for logging
+        if isinstance(progress, str):
+            message = progress
+        else:
+            message = progress.message
+        
+        # Log the message
         try:
-            self.logger.info(message)
+            if message:
+                self.logger.info(message)
         except Exception:
             pass  # Logging failure is non-critical
 
+        # Call progress callback
         if self.progress_callback:
             try:
-                self.progress_callback(message)
+                self.progress_callback(progress)
             except Exception:
                 pass  # Callback failure is non-critical
 
@@ -135,7 +191,11 @@ class ClosetSync:
         Raises:
             RuntimeError: If browser automation fails
         """
-        self._report_progress("Scanning source closet...")
+        self._report_progress(SyncProgress(
+            stage=SyncStage.SCANNING,
+            message="Scanning source closet...",
+            elapsed_seconds=time.time() - self.start_time,
+        ))
 
         try:
             discovered = discover_closet(
@@ -150,7 +210,11 @@ class ClosetSync:
                 max_new_listings=self.max_new_listings,
             )
 
-            self._report_progress(f"Found {len(discovered)} listings in closet")
+            self._report_progress(SyncProgress(
+                stage=SyncStage.SCANNING,
+                message=f"Found {len(discovered)} listings in closet",
+                elapsed_seconds=time.time() - self.start_time,
+            ))
             return discovered
 
         except Exception as error:
@@ -199,8 +263,17 @@ class ClosetSync:
             self.logger.info(f"Download capped at {self.max_new_listings} new listings")
 
         already_downloaded = len(discovered) - len(to_download)
-        self._report_progress(f"{already_downloaded} already downloaded")
-        self._report_progress(f"{len(to_download)} new listings to download")
+        self._report_progress(SyncProgress(
+            stage=SyncStage.DOWNLOADING,
+            message=f"{already_downloaded} already downloaded",
+            elapsed_seconds=time.time() - self.start_time,
+        ))
+        self._report_progress(SyncProgress(
+            stage=SyncStage.DOWNLOADING,
+            total=len(to_download),
+            message=f"{len(to_download)} new listings to download",
+            elapsed_seconds=time.time() - self.start_time,
+        ))
 
         if not to_download:
             return [], []
@@ -238,9 +311,17 @@ class ClosetSync:
                 if len(item.title) > 50:
                     display_title += "..."
 
-                self._report_progress(
-                    f"Downloading {index}/{len(to_download)}: {display_title}"
-                )
+                self._report_progress(SyncProgress(
+                    stage=SyncStage.DOWNLOADING,
+                    current=index,
+                    total=len(to_download),
+                    listing_id=item.listing_id,
+                    listing_title=display_title,
+                    downloaded=len(successful),
+                    failed=len(failed),
+                    message=f"Downloading {index}/{len(to_download)}: {display_title}",
+                    elapsed_seconds=time.time() - self.start_time,
+                ))
 
                 # scrape_listing() automatically saves to disk
                 scrape_listing(page, item.url)
@@ -284,6 +365,7 @@ class ClosetSync:
         # Shared state
         completed_counter = {"count": 0}
         parallel_state = {"any_listing_attempted": False}
+        progress_state = {"downloaded": 0, "failed": 0}
         results_lock = threading.Lock()
         successful_results: list[tuple[int, str]] = []
         failed_results: list[tuple[int, str, str]] = []
@@ -301,6 +383,7 @@ class ClosetSync:
                     successful_results,
                     failed_results,
                     parallel_state,
+                    progress_state,
                 )
                 for worker_id, batch in enumerate(batches)
             ]
@@ -365,6 +448,7 @@ class ClosetSync:
         successful_results: list,
         failed_results: list,
         parallel_state: dict,
+        progress_state: dict,
     ) -> None:
         """
         Worker thread that downloads its assigned batch of listings.
@@ -380,6 +464,7 @@ class ClosetSync:
             successful_results: Shared list for successful downloads
             failed_results: Shared list for failed downloads
             parallel_state: Shared state for parallel execution tracking
+            progress_state: Shared state for download/failed counts
         """
         terminal_indices: set[int] = set()
 
@@ -414,13 +499,22 @@ class ClosetSync:
                             with results_lock:
                                 successful_results.append((original_index, listing.listing_id))
                                 terminal_indices.add(original_index)
+                                progress_state["downloaded"] += 1
                                 completed_counter["count"] += 1
                                 current = completed_counter["count"]
 
                                 # Serialize progress reporting
-                                self._report_progress(
-                                    f"Downloaded {current}/{total_count}: {display_title}"
-                                )
+                                self._report_progress(SyncProgress(
+                                    stage=SyncStage.DOWNLOADING,
+                                    current=current,
+                                    total=total_count,
+                                    listing_id=listing.listing_id,
+                                    listing_title=display_title,
+                                    downloaded=progress_state["downloaded"],
+                                    failed=progress_state["failed"],
+                                    message=f"Downloaded {current}/{total_count}: {display_title}",
+                                    elapsed_seconds=time.time() - self.start_time,
+                                ))
 
                             self.logger.info(
                                 f"Worker {worker_id}: Downloaded {listing.listing_id} - {listing.title}"
@@ -432,13 +526,22 @@ class ClosetSync:
                             with results_lock:
                                 failed_results.append((original_index, listing.listing_id, error_msg))
                                 terminal_indices.add(original_index)
+                                progress_state["failed"] += 1
                                 completed_counter["count"] += 1
                                 current = completed_counter["count"]
 
                                 # Serialize progress reporting
-                                self._report_progress(
-                                    f"Failed {current}/{total_count}: {display_title}"
-                                )
+                                self._report_progress(SyncProgress(
+                                    stage=SyncStage.DOWNLOADING,
+                                    current=current,
+                                    total=total_count,
+                                    listing_id=listing.listing_id,
+                                    listing_title=display_title,
+                                    downloaded=progress_state["downloaded"],
+                                    failed=progress_state["failed"],
+                                    message=f"Failed {current}/{total_count}: {display_title}",
+                                    elapsed_seconds=time.time() - self.start_time,
+                                ))
 
                             self.logger.error(
                                 f"Worker {worker_id}: Failed {listing.listing_id}: {error_msg}"
@@ -471,12 +574,20 @@ class ClosetSync:
         try:
             manager = InventoryManager(self.downloads_dir)
             items = manager.load_items()
-            self._report_progress(f"Inventory loaded: {len(items)} items")
+            self._report_progress(SyncProgress(
+                stage=SyncStage.BUILDING_INVENTORY,
+                message=f"Inventory loaded: {len(items)} items",
+                elapsed_seconds=time.time() - self.start_time,
+            ))
             return items
 
         except Exception as error:
             self.logger.error(f"Inventory reload failed: {error}")
-            self._report_progress("Warning: Inventory reload failed")
+            self._report_progress(SyncProgress(
+                stage=SyncStage.BUILDING_INVENTORY,
+                message="Warning: Inventory reload failed",
+                elapsed_seconds=time.time() - self.start_time,
+            ))
             return []  # Return empty list, don't abort sync
 
     def queue_ready(self, new_ids: list[str]) -> int:
@@ -508,7 +619,11 @@ class ClosetSync:
             ]
 
             if not new_items:
-                self._report_progress("No ready items to queue")
+                self._report_progress(SyncProgress(
+                    stage=SyncStage.QUEUEING,
+                    message="No ready items to queue",
+                    elapsed_seconds=time.time() - self.start_time,
+                ))
                 return 0
 
             # Add to queue
@@ -519,12 +634,21 @@ class ClosetSync:
                 for error in errors[:3]:
                     self.logger.warning(f"Queue error: {error}")
 
-            self._report_progress(f"Queued {added_count} ready listings")
+            self._report_progress(SyncProgress(
+                stage=SyncStage.QUEUEING,
+                queued=added_count,
+                message=f"Queued {added_count} ready listings",
+                elapsed_seconds=time.time() - self.start_time,
+            ))
             return added_count
 
         except Exception as error:
             self.logger.error(f"Queue operation failed: {error}")
-            self._report_progress("Warning: Queue operation failed")
+            self._report_progress(SyncProgress(
+                stage=SyncStage.QUEUEING,
+                message="Warning: Queue operation failed",
+                elapsed_seconds=time.time() - self.start_time,
+            ))
             return 0  # Return 0, don't abort sync
 
     def run(self) -> SyncResult:
@@ -535,6 +659,7 @@ class ClosetSync:
             SyncResult with statistics and errors
         """
         start_time = time.time()
+        self.start_time = start_time
         stats = SyncStats()
 
         try:
@@ -544,7 +669,11 @@ class ClosetSync:
                     f"Source authentication not found: {self.source_state_file}"
                 )
 
-            self._report_progress("Starting closet sync...")
+            self._report_progress(SyncProgress(
+                stage=SyncStage.SCANNING,
+                message="Starting closet sync...",
+                elapsed_seconds=0.0,
+            ))
             self.logger.info(f"Source closet URL: {self.source_closet_url}")
 
             # Launch browser
@@ -581,7 +710,14 @@ class ClosetSync:
             stats.queued = queued
 
             stats.elapsed_seconds = time.time() - start_time
-            self._report_progress("Sync complete")
+            self._report_progress(SyncProgress(
+                stage=SyncStage.COMPLETE,
+                downloaded=stats.new_imported,
+                failed=len(stats.failed),
+                queued=stats.queued,
+                message="Sync complete",
+                elapsed_seconds=stats.elapsed_seconds,
+            ))
 
             self.logger.info(
                 f"Sync complete: {stats.new_imported} imported, "

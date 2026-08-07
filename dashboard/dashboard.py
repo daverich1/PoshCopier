@@ -9,6 +9,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, simpledialog, ttk
+from typing import Union
 
 from dashboard.activity_log import ActivityLog
 from dashboard.inventory_panel import InventoryPanel
@@ -24,7 +25,7 @@ from dashboard.progress_panel import ProgressPanel
 from dashboard.status_panel import StatusPanel
 from dashboard.styles import apply_styles
 from dashboard.thumbnail_panel import ThumbnailPanel
-from pipeline.closet_sync import ClosetSync, SyncResult
+from pipeline.closet_sync import ClosetSync, SyncResult, SyncProgress, SyncStage
 from pipeline_control import (
     request_pause,
     request_resume,
@@ -71,6 +72,10 @@ class PoshCopierDashboard:
         self._sync_thread: threading.Thread | None = None
         self._sync_running = False
         self.import_limit_var = tk.StringVar()
+        
+        # Cache for final Closet Sync display values
+        self._last_sync_current_display = "—"
+        self._last_sync_listing_title = "—"
 
         self._build_interface()
         self._load_import_limit_from_config()
@@ -282,7 +287,98 @@ class PoshCopierDashboard:
         sync_frame.pack(fill="x", pady=(0, 12))
 
         sync_frame.columnconfigure(1, weight=1)
-        sync_frame.columnconfigure(3, weight=1)
+
+        # Import Limit row
+        limit_row = ttk.Frame(sync_frame)
+        limit_row.pack(fill="x", pady=(0, 12))
+        
+        ttk.Label(limit_row, text="Import Limit:").pack(side="left", padx=(0, 8))
+        self.import_limit_combo = ttk.Combobox(
+            limit_row,
+            textvariable=self.import_limit_var,
+            values=["2", "5", "25", "50", "100", "Unlimited"],
+            state="readonly",
+            width=12,
+        )
+        self.import_limit_combo.pack(side="left")
+        self.import_limit_combo.bind("<<ComboboxSelected>>", self._on_import_limit_changed)
+
+        # Progress display frame
+        progress_frame = ttk.Frame(sync_frame)
+        progress_frame.pack(fill="x", pady=(0, 12))
+        progress_frame.columnconfigure(1, weight=1)
+
+        # Stage
+        ttk.Label(progress_frame, text="Stage:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
+        self.sync_stage_var = tk.StringVar(value="Idle")
+        ttk.Label(
+            progress_frame,
+            textvariable=self.sync_stage_var,
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=0, column=1, sticky="w", pady=2)
+
+        # Current / Total
+        ttk.Label(progress_frame, text="Current:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
+        self.sync_current_var = tk.StringVar(value="—")
+        ttk.Label(
+            progress_frame,
+            textvariable=self.sync_current_var,
+        ).grid(row=1, column=1, sticky="w", pady=2)
+
+        # Progress bar
+        self.sync_progressbar = ttk.Progressbar(
+            progress_frame,
+            mode="determinate",
+            maximum=100,
+        )
+        self.sync_progressbar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=4)
+
+        # Statistics grid
+        stats_frame = ttk.Frame(sync_frame)
+        stats_frame.pack(fill="x", pady=(0, 12))
+        stats_frame.columnconfigure(1, weight=1)
+        stats_frame.columnconfigure(3, weight=1)
+        stats_frame.columnconfigure(5, weight=1)
+
+        # Downloaded
+        ttk.Label(stats_frame, text="Downloaded:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.sync_downloaded_var = tk.StringVar(value="0")
+        ttk.Label(stats_frame, textvariable=self.sync_downloaded_var).grid(row=0, column=1, sticky="w")
+
+        # Failed
+        ttk.Label(stats_frame, text="Failed:").grid(row=0, column=2, sticky="e", padx=(16, 8))
+        self.sync_failed_var = tk.StringVar(value="0")
+        ttk.Label(stats_frame, textvariable=self.sync_failed_var).grid(row=0, column=3, sticky="w")
+
+        # Queued
+        ttk.Label(stats_frame, text="Queued:").grid(row=0, column=4, sticky="e", padx=(16, 8))
+        self.sync_queued_var = tk.StringVar(value="0")
+        ttk.Label(stats_frame, textvariable=self.sync_queued_var).grid(row=0, column=5, sticky="w")
+
+        # Timing grid
+        timing_frame = ttk.Frame(sync_frame)
+        timing_frame.pack(fill="x", pady=(0, 12))
+        timing_frame.columnconfigure(1, weight=1)
+        timing_frame.columnconfigure(3, weight=1)
+
+        # Elapsed
+        ttk.Label(timing_frame, text="Elapsed:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.sync_elapsed_var = tk.StringVar(value="—")
+        ttk.Label(timing_frame, textvariable=self.sync_elapsed_var).grid(row=0, column=1, sticky="w")
+
+        # ETA
+        ttk.Label(timing_frame, text="ETA:").grid(row=0, column=2, sticky="e", padx=(16, 8))
+        self.sync_eta_var = tk.StringVar(value="—")
+        ttk.Label(timing_frame, textvariable=self.sync_eta_var).grid(row=0, column=3, sticky="w")
+
+        # Current listing
+        ttk.Label(sync_frame, text="Current Listing:").pack(anchor="w", pady=(0, 4))
+        self.sync_listing_var = tk.StringVar(value="—")
+        ttk.Label(
+            sync_frame,
+            textvariable=self.sync_listing_var,
+            wraplength=600,
+        ).pack(anchor="w", pady=(0, 12))
 
         # Sync button
         self.sync_button = ttk.Button(
@@ -290,103 +386,10 @@ class PoshCopierDashboard:
             text="Sync Closet",
             command=self._on_sync_closet,
         )
-        self.sync_button.grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=(0, 12),
-            pady=4,
-        )
+        self.sync_button.pack(pady=(0, 12))
 
-        # Import Limit label
-        ttk.Label(
-            sync_frame,
-            text="Import Limit:",
-        ).grid(
-            row=0,
-            column=1,
-            sticky="e",
-            padx=(0, 8),
-            pady=4,
-        )
-
-        # Import Limit combobox
-        self.import_limit_combo = ttk.Combobox(
-            sync_frame,
-            textvariable=self.import_limit_var,
-            values=["2", "5", "25", "50", "100", "Unlimited"],
-            state="readonly",
-            width=12,
-        )
-        self.import_limit_combo.grid(
-            row=0,
-            column=2,
-            sticky="w",
-            pady=4,
-        )
-        self.import_limit_combo.bind("<<ComboboxSelected>>", self._on_import_limit_changed)
-
-        # Status label
-        ttk.Label(
-            sync_frame,
-            text="Status:",
-        ).grid(
-            row=1,
-            column=0,
-            sticky="w",
-            padx=(0, 12),
-            pady=4,
-        )
-
-        self.sync_status_var = tk.StringVar(value="Idle")
-        ttk.Label(
-            sync_frame,
-            textvariable=self.sync_status_var,
-            font=("Segoe UI", 9, "bold"),
-        ).grid(
-            row=1,
-            column=1,
-            columnspan=2,
-            sticky="w",
-            pady=4,
-        )
-
-        # Progress label
-        ttk.Label(
-            sync_frame,
-            text="Progress:",
-        ).grid(
-            row=2,
-            column=0,
-            sticky="nw",
-            padx=(0, 12),
-            pady=4,
-        )
-
-        self.sync_progress_var = tk.StringVar(value="—")
-        ttk.Label(
-            sync_frame,
-            textvariable=self.sync_progress_var,
-        ).grid(
-            row=2,
-            column=1,
-            columnspan=2,
-            sticky="w",
-            pady=4,
-        )
-
-        # Output window
-        ttk.Label(
-            sync_frame,
-            text="Output:",
-        ).grid(
-            row=3,
-            column=0,
-            sticky="nw",
-            padx=(0, 12),
-            pady=(8, 4),
-        )
-
+        # Output log (keep existing)
+        ttk.Label(sync_frame, text="Output:").pack(anchor="w", pady=(0, 4))
         self.sync_output = scrolledtext.ScrolledText(
             sync_frame,
             height=6,
@@ -394,13 +397,7 @@ class PoshCopierDashboard:
             wrap="word",
             state="disabled",
         )
-        self.sync_output.grid(
-            row=3,
-            column=1,
-            columnspan=2,
-            sticky="ew",
-            pady=(8, 4),
-        )
+        self.sync_output.pack(fill="x")
 
         upper_content = ttk.Frame(pipeline_tab)
         upper_content.pack(
@@ -515,7 +512,8 @@ class PoshCopierDashboard:
         )
 
         self.upload_queue_panel = UploadQueuePanel(
-            upload_queue_tab
+            upload_queue_tab,
+            mode_var=self.mode_var,
         )
         self.upload_queue_panel.pack(
             fill="both",
@@ -1267,11 +1265,14 @@ class PoshCopierDashboard:
         if not confirmed:
             return
         
+        # Reset UI to clear previous sync results (only when NEW sync begins)
+        self._reset_sync_ui()
+        
         # Update UI state
         self._sync_running = True
         self.sync_button.configure(state="disabled")
-        self.sync_status_var.set("Running")
-        self.sync_progress_var.set("Starting...")
+        self.sync_stage_var.set("Running")
+        self.sync_current_var.set("Starting...")
         
         # Clear output
         self.sync_output.configure(state="normal")
@@ -1318,17 +1319,114 @@ class PoshCopierDashboard:
             )
             self.root.after(0, self._reset_sync_ui)
 
-    def _update_sync_progress(self, message: str) -> None:
-        """Update sync progress (called from worker thread)."""
+    def _update_sync_progress(self, progress: Union[str, SyncProgress]) -> None:
+        """
+        Update sync progress (called from worker thread).
+        
+        Args:
+            progress: Either a string message (backward compatible) or SyncProgress object
+        """
         def update_ui():
-            # Update progress label
-            self.sync_progress_var.set(message)
+            # Handle backward compatibility
+            if isinstance(progress, str):
+                # Legacy string message - just append to output
+                self.sync_output.configure(state="normal")
+                self.sync_output.insert("end", progress + "\n")
+                self.sync_output.see("end")
+                self.sync_output.configure(state="disabled")
+                return
             
-            # Append to output window
-            self.sync_output.configure(state="normal")
-            self.sync_output.insert("end", message + "\n")
-            self.sync_output.see("end")
-            self.sync_output.configure(state="disabled")
+            # Update stage
+            self.sync_stage_var.set(progress.stage.display_label)
+            
+            # Handle COMPLETE stage specially to preserve final values
+            if progress.stage == SyncStage.COMPLETE:
+                # A. Current: Use cached value or update if COMPLETE has valid data
+                if progress.current > 0 and progress.total > 0:
+                    # COMPLETE event has valid values, use and cache them
+                    display_value = f"{progress.current} / {progress.total}"
+                    self.sync_current_var.set(display_value)
+                    self._last_sync_current_display = display_value
+                else:
+                    # COMPLETE event has no values - use cached value
+                    self.sync_current_var.set(self._last_sync_current_display)
+                
+                # B. Current Listing: Use cached value or update if COMPLETE has valid data
+                if progress.listing_title:
+                    # COMPLETE event has a listing title, use and cache it
+                    self.sync_listing_var.set(progress.listing_title)
+                    self._last_sync_listing_title = progress.listing_title
+                else:
+                    # COMPLETE event has no listing title - use cached value
+                    self.sync_listing_var.set(self._last_sync_listing_title)
+                
+                # C. Progress bar: Keep at 100%
+                self.sync_progressbar["value"] = 100
+                
+                # D. ETA: Keep "Complete"
+                self.sync_eta_var.set("Complete")
+            else:
+                # Normal progress update (not COMPLETE)
+                # A. Update current/total and cache if valid
+                if progress.current > 0 and progress.total > 0:
+                    display_value = f"{progress.current} / {progress.total}"
+                    self.sync_current_var.set(display_value)
+                    # Cache the valid display value
+                    self._last_sync_current_display = display_value
+                    percent = (progress.current / progress.total) * 100
+                    self.sync_progressbar["value"] = percent
+                elif progress.total > 0:
+                    # Has total but current is 0
+                    self.sync_current_var.set(f"{progress.current} / {progress.total}")
+                    self.sync_progressbar["value"] = 0
+                else:
+                    self.sync_current_var.set("—")
+                    self.sync_progressbar["value"] = 0
+                
+                # B. Update current listing and cache if non-empty
+                if progress.listing_title:
+                    self.sync_listing_var.set(progress.listing_title)
+                    # Cache the valid listing title
+                    self._last_sync_listing_title = progress.listing_title
+                else:
+                    self.sync_listing_var.set("—")
+                
+                # Calculate and update ETA
+                if (progress.stage == SyncStage.DOWNLOADING and
+                    progress.current >= 3 and progress.total > 0 and progress.current < progress.total):
+                    # Calculate average time per item
+                    avg_time = progress.elapsed_seconds / progress.current
+                    # Calculate remaining items
+                    remaining = progress.total - progress.current
+                    # Estimate remaining time
+                    eta_seconds = avg_time * remaining
+                    eta_minutes = int(eta_seconds // 60)
+                    eta_secs = int(eta_seconds % 60)
+                    self.sync_eta_var.set(f"{eta_minutes}:{eta_secs:02d}")
+                elif progress.stage == SyncStage.DOWNLOADING and progress.current > 0 and progress.current < progress.total:
+                    self.sync_eta_var.set("Calculating...")
+                else:
+                    self.sync_eta_var.set("—")
+            
+            # Update statistics (always, for both COMPLETE and normal stages)
+            self.sync_downloaded_var.set(str(progress.downloaded))
+            self.sync_failed_var.set(str(progress.failed))
+            self.sync_queued_var.set(str(progress.queued))
+            
+            # Update elapsed time (always)
+            if progress.elapsed_seconds > 0:
+                minutes = int(progress.elapsed_seconds // 60)
+                seconds = int(progress.elapsed_seconds % 60)
+                self.sync_elapsed_var.set(f"{minutes}:{seconds:02d}")
+            else:
+                self.sync_elapsed_var.set("—")
+            
+            # Append to output log (keep existing functionality)
+            if progress.message:
+                self.sync_output.configure(state="normal")
+                self.sync_output.insert("end", progress.message + "\n")
+                self.sync_output.see("end")
+                self.sync_output.configure(state="disabled")
         
         # Schedule UI update on main thread
         self.root.after(0, update_ui)
@@ -1375,15 +1473,27 @@ class PoshCopierDashboard:
                 f"Closet sync failed:\n\n{result.error_message}",
             )
         
-        # Reset UI
-        self._reset_sync_ui()
+        # Re-enable sync button but DO NOT reset UI - leave final state visible
+        self._sync_running = False
+        self.sync_button.configure(state="normal")
 
     def _reset_sync_ui(self) -> None:
         """Reset sync UI to idle state."""
         self._sync_running = False
         self.sync_button.configure(state="normal")
-        self.sync_status_var.set("Idle")
-        self.sync_progress_var.set("—")
+        self.sync_stage_var.set("Idle")
+        self.sync_current_var.set("—")
+        self.sync_downloaded_var.set("0")
+        self.sync_failed_var.set("0")
+        self.sync_queued_var.set("0")
+        self.sync_elapsed_var.set("—")
+        self.sync_eta_var.set("—")
+        self.sync_listing_var.set("—")
+        self.sync_progressbar["value"] = 0
+        
+        # Reset cache fields
+        self._last_sync_current_display = "—"
+        self._last_sync_listing_title = "—"
 
     def on_close(self) -> None:
         if (

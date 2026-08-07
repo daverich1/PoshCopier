@@ -24,6 +24,10 @@ from runtime_paths import (
     configure_playwright_browsers,
     ensure_runtime_directories,
 )
+from uploader.destination_cache import (
+    get_or_refresh_destination_urls,
+    save_cache,
+)
 from uploader.duplicate_detector import (
     collect_destination_listing_urls,
 )
@@ -145,6 +149,7 @@ def run_single_listing(
     existing = 0
     would_upload = 0
     already_recorded = 0
+    publish_unverified = 0
     failed = 0
     started_at = time.time()
 
@@ -163,7 +168,7 @@ def run_single_listing(
             )
 
             destination_urls = (
-                collect_destination_listing_urls(
+                get_or_refresh_destination_urls(
                     page,
                     DESTINATION_CLOSET_URL,
                 )
@@ -201,6 +206,8 @@ def run_single_listing(
                     would_upload = 1
                 elif result == "already_recorded":
                     already_recorded = 1
+                elif result == "publish_unverified":
+                    publish_unverified = 1
 
             except Exception:
                 failed = 1
@@ -237,6 +244,10 @@ def run_single_listing(
         str(existing),
     )
     emit_status(
+        "PUBLISH_UNVERIFIED",
+        str(publish_unverified),
+    )
+    emit_status(
         "FAILED",
         str(failed),
     )
@@ -253,6 +264,7 @@ def run_single_listing(
     print("Already existed:", existing)
     print("Would upload:", would_upload)
     print("Already recorded copied:", already_recorded)
+    print("Publish unverified:", publish_unverified)
     print("Failed:", failed)
     print("=" * 72)
 

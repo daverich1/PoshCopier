@@ -31,6 +31,7 @@ class QueueStatus(str, Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
     CANCELLED = "cancelled"
+    PUBLISH_UNVERIFIED = "publish_unverified"
 
 
 # ===== Helper Functions =====
@@ -427,6 +428,28 @@ class UploadQueueManager:
         
         self.save()
     
+    def mark_publish_unverified(self, listing_id: str, message: str = "") -> None:
+        """Mark entry as publish_unverified (publish clicked but not verified)."""
+        entry = self._find_entry(listing_id)
+        
+        if entry is None:
+            raise ValueError(f"Entry not found: {listing_id}")
+        
+        entry.status = QueueStatus.PUBLISH_UNVERIFIED
+        entry.last_error = message
+        entry.finished_at = utc_now()
+        
+        # Calculate duration
+        if entry.started_at:
+            try:
+                started = datetime.fromisoformat(entry.started_at)
+                finished = datetime.fromisoformat(entry.finished_at)
+                entry.duration_seconds = (finished - started).total_seconds()
+            except (ValueError, TypeError):
+                pass
+        
+        self.save()
+    
     def mark_skipped(self, listing_id: str) -> None:
         """Mark entry as skipped."""
         entry = self._find_entry(listing_id)
@@ -548,6 +571,7 @@ class UploadQueueManager:
             "failed": 0,
             "skipped": 0,
             "cancelled": 0,
+            "publish_unverified": 0,
         }
         
         for entry in self.state.entries:
@@ -575,6 +599,7 @@ class UploadQueueManager:
             "failed": counts["failed"],
             "skipped": counts["skipped"],
             "cancelled": counts["cancelled"],
+            "publish_unverified": counts["publish_unverified"],
             "completed": completed,
             "remaining": remaining,
             "percent": percent,

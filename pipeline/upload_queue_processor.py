@@ -250,6 +250,8 @@ class UploadQueueProcessor:
                 self.queue_manager.mark_uploaded(entry.listing_id)
             elif status == QueueStatus.ALREADY_EXISTS:
                 self.queue_manager.mark_already_exists(entry.listing_id)
+            elif status == QueueStatus.PUBLISH_UNVERIFIED:
+                self.queue_manager.mark_publish_unverified(entry.listing_id, message)
             elif status == QueueStatus.SKIPPED:
                 self.queue_manager.mark_skipped(entry.listing_id)
             elif status == QueueStatus.FAILED:
@@ -492,6 +494,9 @@ class UploadQueueProcessor:
         
         if get_int("EXISTING") > 0:
             return QueueStatus.ALREADY_EXISTS, "Duplicate found"
+        
+        if get_int("PUBLISH_UNVERIFIED") > 0:
+            return QueueStatus.PUBLISH_UNVERIFIED, "Publish clicked but verification failed"
         
         if get_int("WOULD_UPLOAD") > 0:
             return QueueStatus.SKIPPED, "Dry-run: would upload"

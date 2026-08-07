@@ -4,6 +4,21 @@ import unicodedata
 from playwright.sync_api import Locator, Page
 
 
+# TEMPORARY TEST HOOK - REMOVE AFTER TASK-023D-P1 VALIDATION
+FORCE_PUBLISH_VERIFICATION_FAILURE = False
+
+
+class PublishUnverifiedException(Exception):
+    """
+    Raised when the final Publish button was clicked (or click was attempted)
+    but the result could not be verified.
+    
+    This is a TERMINAL exception - the publish operation must NOT be retried
+    automatically because the listing may already exist on Poshmark.
+    """
+    pass
+
+
 def normalize_text(value: str | None) -> str:
     if not value:
         return ""
@@ -119,60 +134,177 @@ def collect_listing_links(
     return links
 
 
+def load_fresh_listings_with_scroll(
+    page: Page,
+    target_count: int,
+) -> list[str]:
+    """
+    Scroll to load approximately target_count newest listings.
+    
+    Stops early if:
+    - Target count reached
+    - No new listings load after 3 consecutive checks
+    
+    Args:
+        page: Playwright page (already on closet page)
+        target_count: Approximate number of listings to load (e.g., 96, 144, 192)
+    
+    Returns:
+        List of listing URLs loaded
+    """
+    max_scroll_rounds = 20  # Safety limit
+    stable_rounds = 0
+    previous_count = 0
+    
+    for scroll_round in range(max_scroll_rounds):
+        # Check current listing count
+        current_links = page.locator(
+            'a[href*="/listing/"]'
+        ).evaluate_all(
+            """
+            elements => [
+                ...new Set(
+                    elements
+                        .map(element => element.href)
+                        .filter(Boolean)
+                )
+            ]
+            """
+        )
+        
+        current_count = len(current_links)
+        
+        # Stop if target reached
+        if current_count >= target_count:
+            break
+        
+        # Stop if no progress after 3 rounds
+        if current_count == previous_count:
+            stable_rounds += 1
+            if stable_rounds >= 3:
+                break
+        else:
+            stable_rounds = 0
+        
+        previous_count = current_count
+        
+        # Scroll down
+        page.evaluate(
+            """
+            () => {
+                window.scrollTo(
+                    0,
+                    document.body.scrollHeight
+                );
+            }
+            """
+        )
+        
+        page.wait_for_timeout(1000)
+    
+    # Final collection after scrolling
+    return collect_listing_links(page)
+
+
 def find_published_listing(
     page: Page,
-    expected_title: str,
+    listing: dict,
+    destination_closet_url: str,
 ) -> str | None:
-    expected = normalize_text(expected_title)
-
-    listing_links = collect_listing_links(page)
-
-    print(
-        f"Checking {len(listing_links)} closet "
-        f"listing links for the new listing."
-    )
-
-    # The newest listings should appear first,
-    # so only inspect the first several.
-    for listing_url in listing_links[:15]:
-        try:
-            page.goto(
-                listing_url,
-                wait_until="domcontentloaded",
-            )
-
-            page.wait_for_timeout(1800)
-
-            title_locator = page.locator("h1").first
-
-            if title_locator.count() == 0:
-                continue
-
-            actual_title = title_locator.inner_text().strip()
-            actual = normalize_text(actual_title)
-
-            if (
-                actual == expected
-                or expected in actual
-                or actual in expected
-            ):
-                print(
-                    "Published listing verified:"
-                )
-                print(page.url)
-
-                return page.url
-
-        except Exception:
-            continue
-
+    """
+    Verify the published listing by checking fresh closet data.
+    
+    Uses 3 verification-only attempts with propagation delays.
+    Reuses find_existing_duplicate() for efficient candidate narrowing.
+    
+    Args:
+        page: Playwright page (may be on any page after publish)
+        listing: Full source listing dict with title, brand, price, size
+        destination_closet_url: Explicit closet URL to reload
+    
+    Returns:
+        Destination listing URL if verified, None otherwise
+    """
+    from uploader.duplicate_detector import find_existing_duplicate
+    
+    for attempt in range(1, 4):
+        print(f"\nVerification attempt {attempt}/3")
+        
+        # Always navigate back to closet explicitly
+        print(f"Loading destination closet: {destination_closet_url}")
+        page.goto(
+            destination_closet_url,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+        
+        # Wait for propagation (longer on later attempts)
+        if attempt == 1:
+            delay = 2000
+        elif attempt == 2:
+            delay = 2000
+        else:  # attempt 3
+            delay = 3000
+        
+        page.wait_for_timeout(delay)
+        
+        # Determine target count based on attempt
+        if attempt == 1:
+            target_count = 96
+        elif attempt == 2:
+            target_count = 144
+        else:  # attempt 3
+            target_count = 192
+        
+        print(f"Target fresh links: {target_count}")
+        
+        # Scroll to load target count, then collect
+        fresh_links = load_fresh_listings_with_scroll(page, target_count)
+        
+        print(f"Loaded fresh links: {len(fresh_links)}")
+        print(f"Checking {len(fresh_links)} fresh closet links...")
+        
+        # Reuse existing duplicate detection logic:
+        # - Cheap slug prefiltering (top 8 candidates)
+        # - Full page inspection with scoring
+        # - Threshold >= 80
+        destination_url = find_existing_duplicate(
+            page,
+            listing,
+            fresh_links,
+        )
+        
+        if destination_url:
+            print("\nPublished listing verified:")
+            print(destination_url)
+            return destination_url
+        
+        print("Published listing not visible yet.")
+        
+        if attempt < 3:
+            print("Waiting for Poshmark propagation...")
+    
     return None
 
 
 def publish_listing(
     page: Page,
-    listing_title: str,
+    listing: dict,
+    destination_closet_url: str,
 ) -> str:
+    """
+    Click Next, then click the final Publish button, then verify.
+    
+    Args:
+        page: Playwright page
+        listing: Full source listing dict (needs title, brand, price, size for verification)
+        destination_closet_url: Explicit closet URL for verification retries
+    
+    Raises:
+        PublishUnverifiedException: If publish was attempted but verification failed.
+            This is TERMINAL - do not retry the full publish flow.
+        RuntimeError: For pre-publish failures (button not found, etc.) - retryable.
+    """
     click_next(page)
 
     publish_button = find_publish_button(page)
@@ -183,56 +315,83 @@ def publish_listing(
         )
 
     print("\nThe listing is ready for publishing.")
-    print("Review every field in the browser.")
+    print("Clicking the final publish button...")
 
-    confirmation = input(
-        "Type PUBLISH to click the final button: "
-    ).strip()
+    # ============================================================
+    # COMMIT BOUNDARY: Everything after this point is protected
+    # ============================================================
+    publish_attempted = False
 
-    if confirmation != "PUBLISH":
-        raise RuntimeError(
-            "Publishing was cancelled."
-        )
+    try:
+        # Mark BEFORE click - even if click() raises, we cannot safely
+        # assume Poshmark didn't receive it
+        publish_attempted = True
 
-    publish_button.scroll_into_view_if_needed()
-    publish_button.click()
+        publish_button.scroll_into_view_if_needed()
+        publish_button.click()
 
-    print("Final publish button clicked.")
+        print("Final publish button clicked.")
 
-    page.wait_for_timeout(8000)
-
-    current_url = page.url
-
-    # Some publishes go directly to the new listing.
-    if "/listing/" in current_url:
-        print("Listing published successfully.")
-        print("Destination URL:", current_url)
-
-        return current_url
-
-    # Poshmark may redirect back to the destination closet.
-    if "/closet/" in current_url:
-        print(
-            "Redirected to the closet. "
-            "Searching for the published listing."
-        )
-
-        destination_url = find_published_listing(
-            page,
-            listing_title,
-        )
-
-        if destination_url:
-            print("Listing published successfully.")
-            print(
-                "Destination URL:",
-                destination_url,
+        # TEMPORARY TEST HOOK - REMOVE AFTER TASK-023D-P1 VALIDATION
+        if FORCE_PUBLISH_VERIFICATION_FAILURE:
+            raise PublishUnverifiedException(
+                "TEST ONLY: Forced post-publish verification failure"
             )
 
-            return destination_url
+        page.wait_for_timeout(8000)
 
-    raise RuntimeError(
-        "The final button was clicked, but the "
-        "published listing could not be verified. "
-        f"Current URL: {current_url}"
-    )
+        current_url = page.url
+
+        # A. DIRECT URL SUCCESS
+        # Some publishes go directly to the new listing.
+        if "/listing/" in current_url:
+            print("Listing published successfully.")
+            print("Destination URL:", current_url)
+
+            return current_url
+
+        # B. CLOSET REDIRECT - Perform verification-only retries
+        if "/closet/" in current_url:
+            print(
+                "Redirected to the closet. "
+                "Performing verification with retries..."
+            )
+
+            destination_url = find_published_listing(
+                page,
+                listing,
+                destination_closet_url,
+            )
+
+            if destination_url:
+                print("\nListing published successfully.")
+                print(
+                    "Destination URL:",
+                    destination_url,
+                )
+
+                return destination_url
+
+        # Verification failed after all attempts
+        raise PublishUnverifiedException(
+            f"The final Publish button was clicked, but the published listing "
+            f"could not be verified after 3 attempts. Current URL: {current_url}. "
+            f"DO NOT RETRY - the listing may already exist on Poshmark."
+        )
+
+    except PublishUnverifiedException:
+        # Already the right exception type, re-raise as-is
+        raise
+
+    except Exception as error:
+        # Any other exception after publish_attempted = True
+        # must be converted to PublishUnverifiedException
+        if publish_attempted:
+            raise PublishUnverifiedException(
+                f"Final Publish was attempted, but the result could not be "
+                f"safely verified due to an error: {error}. "
+                f"DO NOT RETRY - the listing may already exist on Poshmark."
+            ) from error
+
+        # Exception before publish attempt - safe to retry
+        raise
