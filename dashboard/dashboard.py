@@ -314,7 +314,7 @@ class PoshCopierDashboard:
         self.import_limit_combo = ttk.Combobox(
             sync_frame,
             textvariable=self.import_limit_var,
-            values=["25", "50", "100", "Unlimited"],
+            values=["2", "5", "25", "50", "100", "Unlimited"],
             state="readonly",
             width=12,
         )
@@ -1181,7 +1181,7 @@ class PoshCopierDashboard:
                 # Validate and convert
                 if limit is None:
                     self.import_limit_var.set("Unlimited")
-                elif limit in [25, 50, 100]:
+                elif limit in [2, 5, 25, 50, 100]:
                     self.import_limit_var.set(str(limit))
                 else:
                     # Invalid value, use default

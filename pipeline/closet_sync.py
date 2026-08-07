@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -14,6 +16,12 @@ from inventory.upload_queue import UploadQueueManager
 from runtime_paths import DOWNLOADS_DIR, LOGS_DIR, SOURCE_STATE_FILE
 from scraper.discover import DiscoveredListing, discover_closet
 from scraper.listing_scraper import scrape_listing
+
+
+# Parallel download configuration
+MAX_DOWNLOAD_WORKERS = 2
+BROWSER_HEADLESS = True
+BROWSER_VIEWPORT = {"width": 1440, "height": 1000}
 
 
 @dataclass
@@ -197,7 +205,29 @@ class ClosetSync:
         if not to_download:
             return [], []
 
-        # Download each new listing sequentially
+        # Choose parallel or sequential download
+        if len(to_download) <= 1:
+            # Use sequential for single listing
+            return self._download_sequential(page, to_download)
+        else:
+            # Use parallel for multiple listings
+            return self._download_parallel(page, to_download)
+
+    def _download_sequential(
+        self,
+        page: Page,
+        to_download: list[DiscoveredListing],
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        """
+        Download listings sequentially (original implementation).
+
+        Args:
+            page: Playwright page instance
+            to_download: List of listings to download
+
+        Returns:
+            Tuple of (successful_ids, failed_items)
+        """
         successful = []
         failed = []
 
@@ -227,6 +257,209 @@ class ClosetSync:
                 # Continue with remaining listings
 
         return successful, failed
+
+    def _download_parallel(
+        self,
+        page: Page,
+        to_download: list[DiscoveredListing],
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        """
+        Download listings in parallel using isolated Playwright workers.
+
+        Args:
+            page: Playwright page instance (for fallback only)
+            to_download: List of listings to download
+
+        Returns:
+            Tuple of (successful_ids, failed_items)
+        """
+        # Partition listings into worker batches (round-robin)
+        batches: list[list[tuple[int, DiscoveredListing]]] = [
+            [] for _ in range(MAX_DOWNLOAD_WORKERS)
+        ]
+        for idx, listing in enumerate(to_download):
+            worker_idx = idx % MAX_DOWNLOAD_WORKERS
+            batches[worker_idx].append((idx, listing))
+
+        # Shared state
+        completed_counter = {"count": 0}
+        parallel_state = {"any_listing_attempted": False}
+        results_lock = threading.Lock()
+        successful_results: list[tuple[int, str]] = []
+        failed_results: list[tuple[int, str, str]] = []
+
+        # Execute workers
+        with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as executor:
+            futures = [
+                executor.submit(
+                    self._download_worker,
+                    worker_id,
+                    batch,
+                    len(to_download),
+                    completed_counter,
+                    results_lock,
+                    successful_results,
+                    failed_results,
+                    parallel_state,
+                )
+                for worker_id, batch in enumerate(batches)
+            ]
+
+            # Wait for all workers
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as error:
+                    self.logger.error(f"Worker thread exception: {error}")
+
+        # Check for early setup failure
+        if not parallel_state["any_listing_attempted"]:
+            self.logger.warning(
+                "Parallel worker setup failed before processing began; "
+                "falling back to sequential downloads."
+            )
+            return self._download_sequential(page, to_download)
+
+        # Reconcile results - ensure every listing has a terminal result
+        terminal_result_indices = set()
+        for idx, _ in successful_results:
+            terminal_result_indices.add(idx)
+        for idx, _, _ in failed_results:
+            terminal_result_indices.add(idx)
+
+        # Add missing results
+        for original_index in range(len(to_download)):
+            if original_index not in terminal_result_indices:
+                listing = to_download[original_index]
+                failed_results.append((
+                    original_index,
+                    listing.listing_id,
+                    "Parallel worker ended without reporting a terminal result"
+                ))
+                self.logger.error(
+                    f"Listing {listing.listing_id} missing terminal result - marking as failed"
+                )
+
+        # Sort by original index to preserve deterministic ordering
+        successful_results.sort(key=lambda x: x[0])
+        failed_results.sort(key=lambda x: x[0])
+
+        successful = [listing_id for _, listing_id in successful_results]
+        failed = [(listing_id, error) for _, listing_id, error in failed_results]
+
+        # Log invariant check (do not crash)
+        if len(successful) + len(failed) != len(to_download):
+            self.logger.error(
+                f"Result count mismatch: {len(successful)} + {len(failed)} != {len(to_download)}"
+            )
+
+        return successful, failed
+
+    def _download_worker(
+        self,
+        worker_id: int,
+        batch: list[tuple[int, DiscoveredListing]],
+        total_count: int,
+        completed_counter: dict,
+        results_lock: threading.Lock,
+        successful_results: list,
+        failed_results: list,
+        parallel_state: dict,
+    ) -> None:
+        """
+        Worker thread that downloads its assigned batch of listings.
+
+        Each worker creates its own isolated Playwright stack.
+
+        Args:
+            worker_id: Worker identifier
+            batch: List of (original_index, listing) tuples
+            total_count: Total number of listings across all workers
+            completed_counter: Shared counter for progress tracking
+            results_lock: Lock for shared state access
+            successful_results: Shared list for successful downloads
+            failed_results: Shared list for failed downloads
+            parallel_state: Shared state for parallel execution tracking
+        """
+        terminal_indices: set[int] = set()
+
+        try:
+            # Create isolated Playwright stack for this thread
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=BROWSER_HEADLESS)
+                context = browser.new_context(
+                    storage_state=str(self.source_state_file),
+                    viewport=BROWSER_VIEWPORT,
+                )
+                page = context.new_page()
+
+                try:
+                    # Process assigned listings sequentially
+                    for original_index, listing in batch:
+                        # Mark first attempt across all workers
+                        with results_lock:
+                            if not parallel_state["any_listing_attempted"]:
+                                parallel_state["any_listing_attempted"] = True
+
+                        try:
+                            # Truncate title for display
+                            display_title = listing.title[:50]
+                            if len(listing.title) > 50:
+                                display_title += "..."
+
+                            # Download listing
+                            scrape_listing(page, listing.url)
+
+                            # Record success - terminal result FIRST
+                            with results_lock:
+                                successful_results.append((original_index, listing.listing_id))
+                                terminal_indices.add(original_index)
+                                completed_counter["count"] += 1
+                                current = completed_counter["count"]
+
+                                # Serialize progress reporting
+                                self._report_progress(
+                                    f"Downloaded {current}/{total_count}: {display_title}"
+                                )
+
+                            self.logger.info(
+                                f"Worker {worker_id}: Downloaded {listing.listing_id} - {listing.title}"
+                            )
+
+                        except Exception as error:
+                            # Record failure - terminal result FIRST
+                            error_msg = str(error)
+                            with results_lock:
+                                failed_results.append((original_index, listing.listing_id, error_msg))
+                                terminal_indices.add(original_index)
+                                completed_counter["count"] += 1
+                                current = completed_counter["count"]
+
+                                # Serialize progress reporting
+                                self._report_progress(
+                                    f"Failed {current}/{total_count}: {display_title}"
+                                )
+
+                            self.logger.error(
+                                f"Worker {worker_id}: Failed {listing.listing_id}: {error_msg}"
+                            )
+                            # Continue with remaining listings
+
+                finally:
+                    context.close()
+                    browser.close()
+
+        except Exception as error:
+            # Worker setup or mid-processing crash
+            error_msg = f"Worker crashed before completion: {error}"
+            self.logger.error(f"Worker {worker_id} crashed: {error}", exc_info=True)
+
+            # Mark all non-terminal listings as failed
+            with results_lock:
+                for original_index, listing in batch:
+                    if original_index not in terminal_indices:
+                        failed_results.append((original_index, listing.listing_id, error_msg))
+                        completed_counter["count"] += 1
 
     def build_inventory(self) -> list[InventoryItem]:
         """
@@ -316,10 +549,10 @@ class ClosetSync:
 
             # Launch browser
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
+                browser = playwright.chromium.launch(headless=BROWSER_HEADLESS)
                 context = browser.new_context(
                     storage_state=str(self.source_state_file),
-                    viewport={"width": 1440, "height": 1000},
+                    viewport=BROWSER_VIEWPORT,
                 )
                 page = context.new_page()
 
