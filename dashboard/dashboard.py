@@ -70,8 +70,10 @@ class PoshCopierDashboard:
         # Closet sync state
         self._sync_thread: threading.Thread | None = None
         self._sync_running = False
+        self.import_limit_var = tk.StringVar()
 
         self._build_interface()
+        self._load_import_limit_from_config()
         self._poll_output_queue()
 
         self.root.protocol(
@@ -280,6 +282,7 @@ class PoshCopierDashboard:
         sync_frame.pack(fill="x", pady=(0, 12))
 
         sync_frame.columnconfigure(1, weight=1)
+        sync_frame.columnconfigure(3, weight=1)
 
         # Sync button
         self.sync_button = ttk.Button(
@@ -295,15 +298,43 @@ class PoshCopierDashboard:
             pady=4,
         )
 
+        # Import Limit label
+        ttk.Label(
+            sync_frame,
+            text="Import Limit:",
+        ).grid(
+            row=0,
+            column=1,
+            sticky="e",
+            padx=(0, 8),
+            pady=4,
+        )
+
+        # Import Limit combobox
+        self.import_limit_combo = ttk.Combobox(
+            sync_frame,
+            textvariable=self.import_limit_var,
+            values=["25", "50", "100", "Unlimited"],
+            state="readonly",
+            width=12,
+        )
+        self.import_limit_combo.grid(
+            row=0,
+            column=2,
+            sticky="w",
+            pady=4,
+        )
+        self.import_limit_combo.bind("<<ComboboxSelected>>", self._on_import_limit_changed)
+
         # Status label
         ttk.Label(
             sync_frame,
             text="Status:",
         ).grid(
-            row=0,
-            column=1,
+            row=1,
+            column=0,
             sticky="w",
-            padx=(0, 8),
+            padx=(0, 12),
             pady=4,
         )
 
@@ -313,8 +344,9 @@ class PoshCopierDashboard:
             textvariable=self.sync_status_var,
             font=("Segoe UI", 9, "bold"),
         ).grid(
-            row=0,
-            column=2,
+            row=1,
+            column=1,
+            columnspan=2,
             sticky="w",
             pady=4,
         )
@@ -324,7 +356,7 @@ class PoshCopierDashboard:
             sync_frame,
             text="Progress:",
         ).grid(
-            row=1,
+            row=2,
             column=0,
             sticky="nw",
             padx=(0, 12),
@@ -336,7 +368,7 @@ class PoshCopierDashboard:
             sync_frame,
             textvariable=self.sync_progress_var,
         ).grid(
-            row=1,
+            row=2,
             column=1,
             columnspan=2,
             sticky="w",
@@ -348,7 +380,7 @@ class PoshCopierDashboard:
             sync_frame,
             text="Output:",
         ).grid(
-            row=2,
+            row=3,
             column=0,
             sticky="nw",
             padx=(0, 12),
@@ -363,7 +395,7 @@ class PoshCopierDashboard:
             state="disabled",
         )
         self.sync_output.grid(
-            row=2,
+            row=3,
             column=1,
             columnspan=2,
             sticky="ew",
@@ -1136,6 +1168,67 @@ class PoshCopierDashboard:
             
             return url
 
+    def _load_import_limit_from_config(self) -> None:
+        """Load closet_sync_import_limit from config.json."""
+        config_file = PROJECT_DIR / "config.json"
+        default_value = "50"
+        
+        if config_file.exists():
+            try:
+                config = json.loads(config_file.read_text(encoding="utf-8"))
+                limit = config.get("closet_sync_import_limit")
+                
+                # Validate and convert
+                if limit is None:
+                    self.import_limit_var.set("Unlimited")
+                elif limit in [25, 50, 100]:
+                    self.import_limit_var.set(str(limit))
+                else:
+                    # Invalid value, use default
+                    self.import_limit_var.set(default_value)
+            except Exception:
+                # Config read failed, use default
+                self.import_limit_var.set(default_value)
+        else:
+            # No config file, use default
+            self.import_limit_var.set(default_value)
+
+    def _on_import_limit_changed(self, event=None) -> None:
+        """Save import limit to config.json when changed."""
+        config_file = PROJECT_DIR / "config.json"
+        
+        try:
+            # Read existing config
+            if config_file.exists():
+                existing_config = json.loads(config_file.read_text(encoding="utf-8"))
+            else:
+                existing_config = {}
+            
+            # Convert UI value to config value
+            ui_value = self.import_limit_var.get()
+            if ui_value == "Unlimited":
+                config_value = None
+            else:
+                config_value = int(ui_value)
+            
+            # Update and save
+            existing_config["closet_sync_import_limit"] = config_value
+            config_file.write_text(
+                json.dumps(existing_config, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            # Non-critical, just continue
+            pass
+
+    def _get_max_new_listings(self) -> int | None:
+        """Convert UI import limit to max_new_listings parameter."""
+        ui_value = self.import_limit_var.get()
+        if ui_value == "Unlimited":
+            return None
+        else:
+            return int(ui_value)
+
     def _on_sync_closet(self) -> None:
         """Handle Sync Closet button click."""
         if self._sync_running:
@@ -1154,6 +1247,10 @@ class PoshCopierDashboard:
             )
             return
         
+        # Get import limit for display
+        max_new = self._get_max_new_listings()
+        limit_display = "Unlimited" if max_new is None else str(max_new)
+        
         # Show confirmation dialog
         confirmed = messagebox.askyesno(
             "Confirm Closet Sync",
@@ -1162,6 +1259,7 @@ class PoshCopierDashboard:
             "• Download only NEW listings\n"
             "• Update Inventory\n"
             "• Queue Ready listings\n\n"
+            f"Import Limit: {limit_display}\n\n"
             "No listings will be uploaded automatically.\n\n"
             "Continue?",
         )
@@ -1183,18 +1281,23 @@ class PoshCopierDashboard:
         # Start worker thread
         self._sync_thread = threading.Thread(
             target=self._run_closet_sync_worker,
-            args=(source_url,),
+            args=(source_url, max_new),
             daemon=True,
         )
         self._sync_thread.start()
 
-    def _run_closet_sync_worker(self, source_url: str) -> None:
+    def _run_closet_sync_worker(
+        self,
+        source_url: str,
+        max_new_listings: int | None,
+    ) -> None:
         """Worker thread for closet sync."""
         try:
             # Create ClosetSync instance with progress callback
             sync = ClosetSync(
                 source_closet_url=source_url,
                 progress_callback=self._update_sync_progress,
+                max_new_listings=max_new_listings,
             )
             
             # Run sync

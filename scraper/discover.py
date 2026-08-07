@@ -298,6 +298,42 @@ def _extract_cards_from_page(page: Page) -> list[dict[str, Any]]:
     ]
 
 
+def _count_listing_cards(page: Page) -> int:
+    """
+    Quickly count the number of listing cards on the page without full extraction.
+    This is much faster than _extract_cards_from_page() for dynamic wait checks.
+    """
+    script = r"""
+    () => {
+        const anchors = document.querySelectorAll('a[href*="/listing/"]');
+        const uniqueUrls = new Set();
+        
+        for (const anchor of anchors) {
+            const href = anchor.href || anchor.getAttribute("href");
+            if (href && /\/listing\//i.test(href)) {
+                try {
+                    const url = new URL(href, window.location.origin);
+                    url.hash = "";
+                    url.search = "";
+                    const normalized = url.toString().replace(/\/$/, "");
+                    uniqueUrls.add(normalized);
+                } catch {
+                    // Skip invalid URLs
+                }
+            }
+        }
+        
+        return uniqueUrls.size;
+    }
+    """
+    
+    try:
+        result = page.evaluate(script)
+        return int(result) if isinstance(result, (int, float)) else 0
+    except Exception:
+        return 0
+
+
 def _listing_exists_locally(listing_id: str, downloads_dir: Path) -> bool:
     """Check if listing already exists in downloads directory."""
     listing_file = downloads_dir / listing_id / "listing.json"
@@ -373,136 +409,142 @@ def _merge_discovery(
     return new_count, updated_count
 
 
-def _apply_available_items_filter(page: Page) -> bool:
+def _ensure_radio_selected(
+    page: Page,
+    selector: str,
+    success_message: str,
+) -> bool:
     """
-    Apply Poshmark's "Available Items" filter before discovery.
+    Reusable helper to ensure a radio button is selected.
+    
+    Args:
+        page: Playwright page object
+        selector: CSS selector for the radio input
+        success_message: Message to print when filter is applied
     
     Returns:
-        True if filter was successfully applied, False otherwise.
+        True if radio was successfully selected and verified, False otherwise.
     """
     try:
-        print("Applying Available Items filter...")
+        # Locate the exact radio with .first
+        radio = page.locator(selector).first
         
-        # Step 1: Find and click the Availability filter button
-        # Try text-based selector first (most resilient)
-        availability_button = None
-        
+        # Check if already checked
         try:
-            # Look for button/element containing "Availability" text
+            if radio.is_checked(timeout=1000):
+                return True
+        except Exception:
+            pass  # Proceed to select if we can't determine state
+        
+        # Try to check with force=True (does not require visibility)
+        try:
+            radio.check(force=True)
+        except Exception:
+            # If check() fails, try evaluate click
+            try:
+                radio.evaluate("(element) => element.click()")
+            except Exception as e:
+                print(f"Warning: Failed to select radio {selector}: {e}")
+                return False
+        
+        # Wait for state to settle
+        page.wait_for_timeout(1500)
+        
+        # Verify the radio is now checked
+        try:
+            if radio.is_checked(timeout=1000):
+                print(success_message)
+                return True
+            else:
+                print(f"Warning: Unable to verify radio selection for {selector}")
+                return False
+        except Exception as e:
+            print(f"Warning: Unable to verify radio selection for {selector}: {e}")
+            return False
+        
+    except Exception as e:
+        print(f"Warning: Failed to ensure radio selected for {selector}: {e}")
+        return False
+
+
+def _apply_available_items_filter(page: Page) -> bool:
+    """
+    Apply Poshmark's "Available Items" and "Active Items" filters before discovery.
+    
+    Returns:
+        True if both filters were successfully applied, False otherwise.
+    """
+    try:
+        # Step 1: Open the Availability filter dropdown
+        try:
             availability_button = page.get_by_text("Availability", exact=False).first
             if availability_button.is_visible(timeout=5000):
                 availability_button.click(timeout=5000)
+                page.wait_for_timeout(1000)
             else:
-                availability_button = None
-        except Exception:
-            availability_button = None
-        
-        # Fallback: try role-based selector
-        if availability_button is None:
-            try:
-                availability_button = page.locator('button:has-text("Availability")').first
-                if availability_button.is_visible(timeout=5000):
-                    availability_button.click(timeout=5000)
-                else:
-                    availability_button = None
-            except Exception:
-                availability_button = None
-        
-        if availability_button is None:
-            print("Warning: Could not locate Availability filter button")
+                print("Warning: Availability filter button not visible")
+                return False
+        except Exception as e:
+            print(f"Warning: Could not open Availability filter: {e}")
             return False
         
-        # Wait for dropdown/menu to appear
-        page.wait_for_timeout(1000)
+        # Step 2: Ensure availability=available is selected
+        availability_selector = 'input[name="availability"][value="available"]'
         
-        # Step 2: Select "Available Items" radio option
-        radio_option = None
-        
+        # Check if already selected before attempting to select
         try:
-            # Look for radio input with label "Available Items"
-            # Try to find the radio button by role first
-            radio_option = page.get_by_role("radio", name="Available Items", exact=True)
-            if radio_option.is_visible(timeout=5000):
-                radio_option.click(timeout=5000)
+            radio = page.locator(availability_selector).first
+            if radio.is_checked(timeout=1000):
+                print("Available Items filter already selected.")
+                availability_success = True
             else:
-                radio_option = None
+                availability_success = _ensure_radio_selected(
+                    page,
+                    availability_selector,
+                    "Available Items filter applied.",
+                )
         except Exception:
-            radio_option = None
+            availability_success = _ensure_radio_selected(
+                page,
+                availability_selector,
+                "Available Items filter applied.",
+            )
         
-        # Fallback: try finding by label text and associated radio
-        if radio_option is None:
-            try:
-                # Look for label containing "Available Items" and find associated radio
-                label = page.locator('label:has-text("Available Items")').first
-                if label.is_visible(timeout=5000):
-                    # Try to find radio input within or associated with this label
-                    radio_option = label.locator('input[type="radio"]').first
-                    if not radio_option.is_visible(timeout=1000):
-                        # Radio might be a sibling or parent element
-                        radio_option = label.locator('..').locator('input[type="radio"]').first
-                    
-                    if radio_option.is_visible(timeout=1000):
-                        radio_option.click(timeout=5000)
-                    else:
-                        # Click the label itself if radio not directly accessible
-                        label.click(timeout=5000)
-                        radio_option = label  # Use label as reference for verification
-                else:
-                    radio_option = None
-            except Exception:
-                radio_option = None
+        if not availability_success:
+            print("Warning: Could not apply Available Items filter")
+            # Continue anyway, don't crash
         
-        # Final fallback: click any element with "Available Items" text
-        if radio_option is None:
-            try:
-                radio_option = page.get_by_text("Available Items", exact=True).first
-                if radio_option.is_visible(timeout=5000):
-                    radio_option.click(timeout=5000)
-                else:
-                    radio_option = None
-            except Exception:
-                radio_option = None
+        # Step 3: Ensure status=active is selected
+        status_selector = 'input[name="status"][value="active"]'
         
-        if radio_option is None:
-            print("Warning: Could not locate Available Items option")
-            return False
-        
-        # Step 3: Verify the radio button is selected
-        page.wait_for_timeout(1000)
-        
-        verified = False
+        # Check if already selected before attempting to select
         try:
-            # Try to verify the radio is checked
-            # Check for aria-checked attribute
-            if radio_option.get_attribute("aria-checked", timeout=2000) == "true":
-                verified = True
-            elif radio_option.get_attribute("checked", timeout=2000) is not None:
-                verified = True
-            elif radio_option.is_checked(timeout=2000):
-                verified = True
+            radio = page.locator(status_selector).first
+            if radio.is_checked(timeout=1000):
+                print("Active Items filter already selected.")
+                status_success = True
+            else:
+                status_success = _ensure_radio_selected(
+                    page,
+                    status_selector,
+                    "Active Items filter applied.",
+                )
         except Exception:
-            # If verification fails, try to find any checked radio with "Available Items"
-            try:
-                checked_radio = page.locator('input[type="radio"][aria-checked="true"]').first
-                if checked_radio.is_visible(timeout=2000):
-                    # Check if it's associated with "Available Items" label
-                    parent = checked_radio.locator('..')
-                    if "Available Items" in parent.inner_text(timeout=1000):
-                        verified = True
-            except Exception:
-                pass
+            status_success = _ensure_radio_selected(
+                page,
+                status_selector,
+                "Active Items filter applied.",
+            )
         
-        if not verified:
-            print("Warning: Unable to verify Available Items filter selection.")
+        if not status_success:
+            print("Warning: Could not apply Active Items filter")
+            # Continue anyway, don't crash
         
-        # Wait for filter to be applied and page to stabilize
-        page.wait_for_timeout(2000)
-        
-        print("Available Items filter applied.")
-        return True
+        # Return True only if both succeeded
+        return availability_success and status_success
         
     except Exception as e:
-        print(f"Warning: Failed to apply Available Items filter: {e}")
+        print(f"Warning: Failed to apply filters: {e}")
         return False
 
 
@@ -516,6 +558,7 @@ def discover_closet(
     progress_path: Path | None = None,
     downloads_dir: Path | None = None,
     incremental_threshold: int = DEFAULT_INCREMENTAL_THRESHOLD,
+    max_new_listings: int | None = None,
 ) -> list[DiscoveredListing]:
     print(f"Opening source closet: {closet_url}")
 
@@ -536,6 +579,7 @@ def discover_closet(
     
     # Incremental sync initialization
     boundary_reached = False
+    import_limit_reached = False
     stopping_reason = "End of closet"
     if downloads_dir is not None:
         print("Incremental Sync Enabled")
@@ -588,6 +632,16 @@ def discover_closet(
                 else:
                     consecutive_existing = 0
                     new_listings_count += 1
+                    
+                    # Check max_new_listings limit
+                    if max_new_listings is not None:
+                        print(f"New listing found ({new_listings_count}/{max_new_listings})")
+                        
+                        if new_listings_count >= max_new_listings:
+                            stopping_reason = "Import limit reached"
+                            import_limit_reached = True
+                            boundary_reached = True
+                            break
 
         new_count, _ = _merge_discovery(
             discovered,
@@ -596,7 +650,11 @@ def discover_closet(
         
         # Check if we should stop after merge
         if boundary_reached:
-            print("\nReached sync boundary. Stopping discovery.")
+            if import_limit_reached:
+                print(f"\nImport limit reached ({new_listings_count} new listings).")
+                print("Stopping discovery.")
+            else:
+                print("\nReached sync boundary. Stopping discovery.")
             break
 
         current_count = len(discovered)
@@ -655,6 +713,7 @@ def discover_closet(
         previous_count = current_count
         previous_height = current_height
 
+        # Dynamic wait after scroll
         page.evaluate(
             """
             () => window.scrollTo(
@@ -663,7 +722,39 @@ def discover_closet(
             )
             """
         )
-        page.wait_for_timeout(scroll_pause_ms)
+        
+        # Dynamic wait parameters
+        check_interval_ms = 150
+        minimum_wait_ms = 600
+        stable_checks_needed = 4
+        max_wait_ms = 2500
+        
+        # Track timing and card growth
+        wait_start_time = time.time()
+        elapsed_ms = 0
+        previous_card_count = _count_listing_cards(page)
+        stable_check_count = 0
+        
+        # Dynamic wait loop
+        while elapsed_ms < max_wait_ms:
+            page.wait_for_timeout(check_interval_ms)
+            elapsed_ms = (time.time() - wait_start_time) * 1000
+            
+            current_card_count = _count_listing_cards(page)
+            
+            if current_card_count > previous_card_count:
+                # Growth detected, reset stability counter
+                previous_card_count = current_card_count
+                stable_check_count = 0
+            else:
+                # No growth detected
+                stable_check_count += 1
+                
+                # Only allow early exit after minimum wait period
+                if elapsed_ms >= minimum_wait_ms:
+                    if stable_check_count >= stable_checks_needed:
+                        # Stable for required checks, exit early
+                        break
 
         if scroll_number % 5 == 0:
             page.evaluate("() => window.scrollBy(0, -500)")

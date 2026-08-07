@@ -52,6 +52,7 @@ class ClosetSync:
         source_state_file: Path = SOURCE_STATE_FILE,
         progress_callback: Callable[[str], None] | None = None,
         log_file: Path | None = None,
+        max_new_listings: int | None = 50,
     ) -> None:
         """
         Initialize ClosetSync.
@@ -62,11 +63,13 @@ class ClosetSync:
             source_state_file: Path to Playwright auth state
             progress_callback: Thread-safe callback for progress updates
             log_file: Path to log file (default: logs/closet_sync.log)
+            max_new_listings: Maximum new listings to import per sync (default: 50)
         """
         self.source_closet_url = source_closet_url
         self.downloads_dir = downloads_dir
         self.source_state_file = source_state_file
         self.progress_callback = progress_callback
+        self.max_new_listings = max_new_listings
 
         self._setup_logging(log_file)
 
@@ -136,6 +139,7 @@ class ClosetSync:
                 progress_path=None,
                 downloads_dir=self.downloads_dir,
                 incremental_threshold=50,
+                max_new_listings=self.max_new_listings,
             )
 
             self._report_progress(f"Found {len(discovered)} listings in closet")
@@ -177,6 +181,14 @@ class ClosetSync:
             for item in discovered
             if item.available and item.listing_id not in existing_ids
         ]
+
+        # Apply max_new_listings cap if set (defense-in-depth)
+        if self.max_new_listings is not None and len(to_download) > self.max_new_listings:
+            to_download = to_download[:self.max_new_listings]
+            self._report_progress(
+                f"Capping download to {self.max_new_listings} new listings"
+            )
+            self.logger.info(f"Download capped at {self.max_new_listings} new listings")
 
         already_downloaded = len(discovered) - len(to_download)
         self._report_progress(f"{already_downloaded} already downloaded")
