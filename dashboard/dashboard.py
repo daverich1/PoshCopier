@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import queue
 import subprocess
@@ -7,11 +8,12 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, scrolledtext, simpledialog, ttk
 
 from dashboard.activity_log import ActivityLog
 from dashboard.inventory_panel import InventoryPanel
 from dashboard.recovery_panel import RecoveryPanel
+from dashboard.upload_queue_panel import UploadQueuePanel
 from dashboard.controls import ControlsPanel
 from dashboard.pipeline_io import (
     StatusEvent,
@@ -22,6 +24,7 @@ from dashboard.progress_panel import ProgressPanel
 from dashboard.status_panel import StatusPanel
 from dashboard.styles import apply_styles
 from dashboard.thumbnail_panel import ThumbnailPanel
+from pipeline.closet_sync import ClosetSync, SyncResult
 from pipeline_control import (
     request_pause,
     request_resume,
@@ -63,6 +66,10 @@ class PoshCopierDashboard:
         self.retries_var = tk.StringVar(value="3")
         self.retry_delay_var = tk.StringVar(value="3")
         self.command_input_var = tk.StringVar(value="")
+
+        # Closet sync state
+        self._sync_thread: threading.Thread | None = None
+        self._sync_running = False
 
         self._build_interface()
         self._poll_output_queue()
@@ -112,6 +119,10 @@ class PoshCopierDashboard:
             notebook,
             padding=0,
         )
+        upload_queue_tab = ttk.Frame(
+            notebook,
+            padding=0,
+        )
         recovery_tab = ttk.Frame(
             notebook,
             padding=0,
@@ -124,6 +135,10 @@ class PoshCopierDashboard:
         notebook.add(
             inventory_tab,
             text="Inventory",
+        )
+        notebook.add(
+            upload_queue_tab,
+            text="Upload Queue",
         )
         notebook.add(
             recovery_tab,
@@ -256,6 +271,105 @@ class PoshCopierDashboard:
             pady=12,
         )
 
+        # Closet Sync section
+        sync_frame = ttk.LabelFrame(
+            pipeline_tab,
+            text="Closet Sync",
+            padding=12,
+        )
+        sync_frame.pack(fill="x", pady=(0, 12))
+
+        sync_frame.columnconfigure(1, weight=1)
+
+        # Sync button
+        self.sync_button = ttk.Button(
+            sync_frame,
+            text="Sync Closet",
+            command=self._on_sync_closet,
+        )
+        self.sync_button.grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 12),
+            pady=4,
+        )
+
+        # Status label
+        ttk.Label(
+            sync_frame,
+            text="Status:",
+        ).grid(
+            row=0,
+            column=1,
+            sticky="w",
+            padx=(0, 8),
+            pady=4,
+        )
+
+        self.sync_status_var = tk.StringVar(value="Idle")
+        ttk.Label(
+            sync_frame,
+            textvariable=self.sync_status_var,
+            font=("Segoe UI", 9, "bold"),
+        ).grid(
+            row=0,
+            column=2,
+            sticky="w",
+            pady=4,
+        )
+
+        # Progress label
+        ttk.Label(
+            sync_frame,
+            text="Progress:",
+        ).grid(
+            row=1,
+            column=0,
+            sticky="nw",
+            padx=(0, 12),
+            pady=4,
+        )
+
+        self.sync_progress_var = tk.StringVar(value="—")
+        ttk.Label(
+            sync_frame,
+            textvariable=self.sync_progress_var,
+        ).grid(
+            row=1,
+            column=1,
+            columnspan=2,
+            sticky="w",
+            pady=4,
+        )
+
+        # Output window
+        ttk.Label(
+            sync_frame,
+            text="Output:",
+        ).grid(
+            row=2,
+            column=0,
+            sticky="nw",
+            padx=(0, 12),
+            pady=(8, 4),
+        )
+
+        self.sync_output = scrolledtext.ScrolledText(
+            sync_frame,
+            height=6,
+            width=80,
+            wrap="word",
+            state="disabled",
+        )
+        self.sync_output.grid(
+            row=2,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            pady=(8, 4),
+        )
+
         upper_content = ttk.Frame(pipeline_tab)
         upper_content.pack(
             fill="x",
@@ -364,6 +478,14 @@ class PoshCopierDashboard:
             inventory_tab
         )
         self.inventory_panel.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.upload_queue_panel = UploadQueuePanel(
+            upload_queue_tab
+        )
+        self.upload_queue_panel.pack(
             fill="both",
             expand=True,
         )
@@ -923,6 +1045,242 @@ class PoshCopierDashboard:
                 "Could Not Open Logs",
                 str(error),
             )
+
+    def _get_source_closet_url(self) -> str | None:
+        """Get source closet URL from config.json or prompt user."""
+        config_file = PROJECT_DIR / "config.json"
+        existing_config = {}
+        config_is_valid = False
+        
+        # Try reading from config.json
+        if config_file.exists():
+            try:
+                existing_config = json.loads(config_file.read_text(encoding="utf-8"))
+                config_is_valid = True
+                url = existing_config.get("source_closet_url", "").strip()
+                if url:
+                    return url
+            except Exception:
+                # Config exists but is invalid JSON
+                config_is_valid = False
+        
+        # Prompt user for URL
+        while True:
+            url = simpledialog.askstring(
+                "Source Closet URL",
+                "Enter the source Poshmark closet URL:\n"
+                "(e.g., https://poshmark.com/closet/username)",
+                parent=self.root,
+            )
+            
+            if not url:
+                # User cancelled
+                return None
+            
+            url = url.strip()
+            
+            # Validate URL format
+            if not url.startswith("https://poshmark.com/closet/"):
+                messagebox.showerror(
+                    "Invalid URL",
+                    "URL must start with:\nhttps://poshmark.com/closet/",
+                )
+                continue
+            
+            # Extract and validate username
+            username = url.replace("https://poshmark.com/closet/", "").strip("/")
+            if not username:
+                messagebox.showerror(
+                    "Invalid URL",
+                    "URL must contain a closet username after:\n"
+                    "https://poshmark.com/closet/",
+                )
+                continue
+            
+            # Valid URL - try to save it
+            if config_is_valid:
+                # Merge with existing config
+                try:
+                    existing_config["source_closet_url"] = url
+                    config_file.write_text(
+                        json.dumps(existing_config, indent=2),
+                        encoding="utf-8",
+                    )
+                except Exception as error:
+                    messagebox.showwarning(
+                        "Config Save Failed",
+                        f"Could not save to config.json:\n{error}\n\n"
+                        "Continuing with this URL for current session only.",
+                    )
+            elif config_file.exists():
+                # Config exists but is invalid - don't overwrite
+                messagebox.showwarning(
+                    "Invalid Config File",
+                    "config.json exists but contains invalid JSON.\n\n"
+                    "Please fix or delete the file manually.\n\n"
+                    "Continuing with this URL for current session only.",
+                )
+            else:
+                # No config file - create new one
+                try:
+                    config_file.write_text(
+                        json.dumps({"source_closet_url": url}, indent=2),
+                        encoding="utf-8",
+                    )
+                except Exception as error:
+                    messagebox.showwarning(
+                        "Config Save Failed",
+                        f"Could not create config.json:\n{error}\n\n"
+                        "Continuing with this URL for current session only.",
+                    )
+            
+            return url
+
+    def _on_sync_closet(self) -> None:
+        """Handle Sync Closet button click."""
+        if self._sync_running:
+            messagebox.showwarning(
+                "Sync Running",
+                "Closet sync is already running.",
+            )
+            return
+        
+        # Get source closet URL
+        source_url = self._get_source_closet_url()
+        if not source_url:
+            messagebox.showerror(
+                "No Source URL",
+                "Source closet URL is required to sync.",
+            )
+            return
+        
+        # Show confirmation dialog
+        confirmed = messagebox.askyesno(
+            "Confirm Closet Sync",
+            "This will:\n\n"
+            "• Scan the source closet\n"
+            "• Download only NEW listings\n"
+            "• Update Inventory\n"
+            "• Queue Ready listings\n\n"
+            "No listings will be uploaded automatically.\n\n"
+            "Continue?",
+        )
+        
+        if not confirmed:
+            return
+        
+        # Update UI state
+        self._sync_running = True
+        self.sync_button.configure(state="disabled")
+        self.sync_status_var.set("Running")
+        self.sync_progress_var.set("Starting...")
+        
+        # Clear output
+        self.sync_output.configure(state="normal")
+        self.sync_output.delete("1.0", "end")
+        self.sync_output.configure(state="disabled")
+        
+        # Start worker thread
+        self._sync_thread = threading.Thread(
+            target=self._run_closet_sync_worker,
+            args=(source_url,),
+            daemon=True,
+        )
+        self._sync_thread.start()
+
+    def _run_closet_sync_worker(self, source_url: str) -> None:
+        """Worker thread for closet sync."""
+        try:
+            # Create ClosetSync instance with progress callback
+            sync = ClosetSync(
+                source_closet_url=source_url,
+                progress_callback=self._update_sync_progress,
+            )
+            
+            # Run sync
+            result = sync.run()
+            
+            # Schedule completion handler on main thread
+            self.root.after(0, self._on_sync_complete, result)
+            
+        except Exception as error:
+            # Schedule error handler on main thread
+            error_msg = str(error)
+            self.root.after(
+                0,
+                lambda: messagebox.showerror(
+                    "Sync Failed",
+                    f"Closet sync failed:\n\n{error_msg}",
+                ),
+            )
+            self.root.after(0, self._reset_sync_ui)
+
+    def _update_sync_progress(self, message: str) -> None:
+        """Update sync progress (called from worker thread)."""
+        def update_ui():
+            # Update progress label
+            self.sync_progress_var.set(message)
+            
+            # Append to output window
+            self.sync_output.configure(state="normal")
+            self.sync_output.insert("end", message + "\n")
+            self.sync_output.see("end")
+            self.sync_output.configure(state="disabled")
+        
+        # Schedule UI update on main thread
+        self.root.after(0, update_ui)
+
+    def _on_sync_complete(self, result: SyncResult) -> None:
+        """Handle sync completion."""
+        if result.success:
+            # Format elapsed time
+            elapsed = result.stats.elapsed_seconds
+            if elapsed < 60:
+                elapsed_str = f"{elapsed:.1f} seconds"
+            else:
+                minutes = int(elapsed // 60)
+                seconds = int(elapsed % 60)
+                elapsed_str = f"{minutes}m {seconds}s"
+            
+            # Build summary message
+            summary = (
+                f"Closet Sync Complete\n\n"
+                f"Scanned: {result.stats.total_scanned}\n"
+                f"Already Downloaded: {result.stats.already_downloaded}\n"
+                f"New Downloaded: {result.stats.new_imported}\n"
+                f"Queued: {result.stats.queued}\n"
+                f"Failed: {len(result.stats.failed)}\n"
+                f"Elapsed Time: {elapsed_str}"
+            )
+            
+            if result.stats.failed:
+                summary += "\n\nFailed listings:\n"
+                for listing_id, error in result.stats.failed[:5]:
+                    summary += f"  • {listing_id}: {error[:50]}\n"
+                if len(result.stats.failed) > 5:
+                    summary += f"  ... and {len(result.stats.failed) - 5} more"
+            
+            messagebox.showinfo("Sync Complete", summary)
+            
+            # Refresh panels
+            self.inventory_panel.refresh()
+            self.upload_queue_panel.refresh()
+            
+        else:
+            messagebox.showerror(
+                "Sync Failed",
+                f"Closet sync failed:\n\n{result.error_message}",
+            )
+        
+        # Reset UI
+        self._reset_sync_ui()
+
+    def _reset_sync_ui(self) -> None:
+        """Reset sync UI to idle state."""
+        self._sync_running = False
+        self.sync_button.configure(state="normal")
+        self.sync_status_var.set("Idle")
+        self.sync_progress_var.set("—")
 
     def on_close(self) -> None:
         if (

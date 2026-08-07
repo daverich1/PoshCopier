@@ -18,6 +18,10 @@ except ImportError:
     from availability import classify_card_status
 
 
+# Incremental sync threshold - stop after this many consecutive known listings
+DEFAULT_INCREMENTAL_THRESHOLD = 50
+
+
 @dataclass(slots=True)
 class DiscoveredListing:
     listing_id: str
@@ -294,6 +298,12 @@ def _extract_cards_from_page(page: Page) -> list[dict[str, Any]]:
     ]
 
 
+def _listing_exists_locally(listing_id: str, downloads_dir: Path) -> bool:
+    """Check if listing already exists in downloads directory."""
+    listing_file = downloads_dir / listing_id / "listing.json"
+    return listing_file.exists()
+
+
 def _merge_discovery(
     discovered: dict[str, DiscoveredListing],
     raw_cards: list[dict[str, Any]],
@@ -363,6 +373,139 @@ def _merge_discovery(
     return new_count, updated_count
 
 
+def _apply_available_items_filter(page: Page) -> bool:
+    """
+    Apply Poshmark's "Available Items" filter before discovery.
+    
+    Returns:
+        True if filter was successfully applied, False otherwise.
+    """
+    try:
+        print("Applying Available Items filter...")
+        
+        # Step 1: Find and click the Availability filter button
+        # Try text-based selector first (most resilient)
+        availability_button = None
+        
+        try:
+            # Look for button/element containing "Availability" text
+            availability_button = page.get_by_text("Availability", exact=False).first
+            if availability_button.is_visible(timeout=5000):
+                availability_button.click(timeout=5000)
+            else:
+                availability_button = None
+        except Exception:
+            availability_button = None
+        
+        # Fallback: try role-based selector
+        if availability_button is None:
+            try:
+                availability_button = page.locator('button:has-text("Availability")').first
+                if availability_button.is_visible(timeout=5000):
+                    availability_button.click(timeout=5000)
+                else:
+                    availability_button = None
+            except Exception:
+                availability_button = None
+        
+        if availability_button is None:
+            print("Warning: Could not locate Availability filter button")
+            return False
+        
+        # Wait for dropdown/menu to appear
+        page.wait_for_timeout(1000)
+        
+        # Step 2: Select "Available Items" radio option
+        radio_option = None
+        
+        try:
+            # Look for radio input with label "Available Items"
+            # Try to find the radio button by role first
+            radio_option = page.get_by_role("radio", name="Available Items", exact=True)
+            if radio_option.is_visible(timeout=5000):
+                radio_option.click(timeout=5000)
+            else:
+                radio_option = None
+        except Exception:
+            radio_option = None
+        
+        # Fallback: try finding by label text and associated radio
+        if radio_option is None:
+            try:
+                # Look for label containing "Available Items" and find associated radio
+                label = page.locator('label:has-text("Available Items")').first
+                if label.is_visible(timeout=5000):
+                    # Try to find radio input within or associated with this label
+                    radio_option = label.locator('input[type="radio"]').first
+                    if not radio_option.is_visible(timeout=1000):
+                        # Radio might be a sibling or parent element
+                        radio_option = label.locator('..').locator('input[type="radio"]').first
+                    
+                    if radio_option.is_visible(timeout=1000):
+                        radio_option.click(timeout=5000)
+                    else:
+                        # Click the label itself if radio not directly accessible
+                        label.click(timeout=5000)
+                        radio_option = label  # Use label as reference for verification
+                else:
+                    radio_option = None
+            except Exception:
+                radio_option = None
+        
+        # Final fallback: click any element with "Available Items" text
+        if radio_option is None:
+            try:
+                radio_option = page.get_by_text("Available Items", exact=True).first
+                if radio_option.is_visible(timeout=5000):
+                    radio_option.click(timeout=5000)
+                else:
+                    radio_option = None
+            except Exception:
+                radio_option = None
+        
+        if radio_option is None:
+            print("Warning: Could not locate Available Items option")
+            return False
+        
+        # Step 3: Verify the radio button is selected
+        page.wait_for_timeout(1000)
+        
+        verified = False
+        try:
+            # Try to verify the radio is checked
+            # Check for aria-checked attribute
+            if radio_option.get_attribute("aria-checked", timeout=2000) == "true":
+                verified = True
+            elif radio_option.get_attribute("checked", timeout=2000) is not None:
+                verified = True
+            elif radio_option.is_checked(timeout=2000):
+                verified = True
+        except Exception:
+            # If verification fails, try to find any checked radio with "Available Items"
+            try:
+                checked_radio = page.locator('input[type="radio"][aria-checked="true"]').first
+                if checked_radio.is_visible(timeout=2000):
+                    # Check if it's associated with "Available Items" label
+                    parent = checked_radio.locator('..')
+                    if "Available Items" in parent.inner_text(timeout=1000):
+                        verified = True
+            except Exception:
+                pass
+        
+        if not verified:
+            print("Warning: Unable to verify Available Items filter selection.")
+        
+        # Wait for filter to be applied and page to stabilize
+        page.wait_for_timeout(2000)
+        
+        print("Available Items filter applied.")
+        return True
+        
+    except Exception as e:
+        print(f"Warning: Failed to apply Available Items filter: {e}")
+        return False
+
+
 def discover_closet(
     page: Page,
     closet_url: str,
@@ -371,6 +514,8 @@ def discover_closet(
     stable_rounds_required: int = 8,
     scroll_pause_ms: int = 1200,
     progress_path: Path | None = None,
+    downloads_dir: Path | None = None,
+    incremental_threshold: int = DEFAULT_INCREMENTAL_THRESHOLD,
 ) -> list[DiscoveredListing]:
     print(f"Opening source closet: {closet_url}")
 
@@ -381,18 +526,78 @@ def discover_closet(
     )
     page.wait_for_timeout(3000)
 
+    # Apply Available Items filter before discovery
+    _apply_available_items_filter(page)
+
     discovered: dict[str, DiscoveredListing] = {}
     stable_rounds = 0
     previous_count = 0
     previous_height = 0
+    
+    # Incremental sync initialization
+    boundary_reached = False
+    stopping_reason = "End of closet"
+    if downloads_dir is not None:
+        print("Incremental Sync Enabled")
+        processed_incremental_ids: set[str] = set()
+        consecutive_existing = 0
+        new_listings_count = 0
+        existing_listings_count = 0
 
     for scroll_number in range(1, max_scrolls + 1):
         raw_cards = _extract_cards_from_page(page)
+        
+        # Incremental boundary check (if enabled)
+        if downloads_dir is not None and not boundary_reached:
+            for raw in raw_cards:
+                url = canonicalize_listing_url(str(raw.get("url", "")))
+                if not url or "/listing/" not in url:
+                    continue
+                
+                listing_id = listing_id_from_url(url)
+                
+                if listing_id in processed_incremental_ids:
+                    continue
+                
+                processed_incremental_ids.add(listing_id)
+                
+                # Check availability
+                raw_labels = raw.get("statusLabels", [])
+                status_labels = (
+                    [str(v) for v in raw_labels if isinstance(v, str)]
+                    if isinstance(raw_labels, list)
+                    else []
+                )
+                card_text = str(raw.get("cardText", "") or "")
+                availability = classify_card_status(card_text, status_labels)
+                
+                if not availability.available:
+                    continue
+                
+                # Check if exists locally
+                if _listing_exists_locally(listing_id, downloads_dir):
+                    consecutive_existing += 1
+                    existing_listings_count += 1
+                    print(f"Known listing found ({consecutive_existing} consecutive)")
+                    
+                    # Check threshold immediately
+                    if consecutive_existing >= incremental_threshold:
+                        stopping_reason = "Incremental boundary reached"
+                        boundary_reached = True
+                        break
+                else:
+                    consecutive_existing = 0
+                    new_listings_count += 1
 
         new_count, _ = _merge_discovery(
             discovered,
             raw_cards,
         )
+        
+        # Check if we should stop after merge
+        if boundary_reached:
+            print("\nReached sync boundary. Stopping discovery.")
+            break
 
         current_count = len(discovered)
 
@@ -490,6 +695,12 @@ def discover_closet(
     print(f"Discovery complete: {len(results)} total")
     print(f"Active card candidates: {active_count}")
     print(f"Unavailable card candidates: {inactive_count}")
+    
+    # Report incremental sync statistics
+    if downloads_dir is not None:
+        print(f"Stopping reason: {stopping_reason}")
+        print(f"New listings: {new_listings_count}")
+        print(f"Existing listings: {existing_listings_count}")
 
     return results
 
