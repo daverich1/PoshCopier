@@ -31,7 +31,7 @@ LOGS_DIR = PROJECT_DIR / "logs"
 
 # Keep this at 5 while testing.
 # Change to None after confirming unavailable items are skipped.
-MAX_NEW_LISTINGS_PER_RUN = 5
+MAX_NEW_LISTINGS_PER_RUN = 50
 
 
 def listing_folder(
