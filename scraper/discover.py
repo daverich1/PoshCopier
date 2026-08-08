@@ -33,6 +33,25 @@ class DiscoveredListing:
     matched_status_text: str = ""
 
 
+# Backward-compatible result types used by the root scraper.py.
+# These let the newer discovery engine work with the existing scraper
+# without removing any of the current discovery functionality.
+@dataclass(slots=True)
+class UnavailableCard:
+    url: str
+    status: str
+    unavailable_reason: str | None
+    listing_id: str = ""
+    title: str = ""
+
+
+@dataclass(slots=True)
+class DiscoveryResult:
+    available_urls: list[str]
+    unavailable_cards: list[UnavailableCard]
+    total_cards: int
+
+
 def canonicalize_listing_url(
     url: str,
     base_url: str = "https://poshmark.com",
@@ -61,6 +80,16 @@ def listing_id_from_url(url: str) -> str:
         return match.group(1).lower()
 
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:24]
+
+
+
+def extract_listing_id(listing_url: str) -> str:
+    """
+    Backward-compatible alias used by the existing root scraper.py.
+    """
+    return listing_id_from_url(
+        canonicalize_listing_url(listing_url)
+    )
 
 
 def _extract_cards_from_page(page: Page) -> list[dict[str, Any]]:
@@ -121,9 +150,22 @@ def _extract_cards_from_page(page: Page) -> list[dict[str, Any]]:
     '[aria-label="Inactive" i]'
 ];
 
-        const getStatusLabels = (card) => {
+        const getStatusLabels = (card, listingUrl) => {
             const labels = [];
             const seen = new Set();
+            
+            // Known Poshmark status overlay class - prioritize this
+            const preferredOverlay = card.querySelector('.tile-grid-redesign__listing-status-overlay');
+            
+            // Valid unavailable status texts (normalized)
+            const validStatuses = new Set([
+                'sold',
+                'sold out',
+                'not for sale',
+                'inactive',
+                'unavailable',
+                'not available'
+            ]);
 
             for (const selector of statusSelectors) {
                 for (const node of card.querySelectorAll(selector)) {
@@ -146,10 +188,55 @@ def _extract_cards_from_page(page: Page) -> list[dict[str, Any]]:
 
                     const normalized = text.toLowerCase();
 
-                    if (text && !seen.has(normalized)) {
-                        labels.push(text);
-                        seen.add(normalized);
+                    // Skip if text is empty or already seen
+                    if (!text || seen.has(normalized)) {
+                        continue;
                     }
+                    
+                    // Only accept text that matches known unavailable statuses
+                    if (!validStatuses.has(normalized)) {
+                        continue;
+                    }
+                    
+                    // Check if this status node belongs to a nested/neighboring listing
+                    // by checking if it contains or is contained by a different listing link
+                    const nodeListingUrls = uniqueListingUrls(node);
+                    
+                    // If the status node itself contains listing links, ensure they match our card
+                    if (nodeListingUrls.size > 0 && !nodeListingUrls.has(listingUrl)) {
+                        continue; // This status belongs to a different listing
+                    }
+                    
+                    // Check if the status node is inside a nested listing anchor
+                    let parent = node.parentElement;
+                    let isNestedInDifferentListing = false;
+                    
+                    for (let i = 0; i < 5 && parent && parent !== card; i++) {
+                        if (parent.matches && parent.matches('a[href*="/listing/"]')) {
+                            const parentHref = normalizeHref(parent.href);
+                            if (parentHref && parentHref !== listingUrl) {
+                                isNestedInDifferentListing = true;
+                                break;
+                            }
+                        }
+                        parent = parent.parentElement;
+                    }
+                    
+                    if (isNestedInDifferentListing) {
+                        continue; // This status is inside a different listing's anchor
+                    }
+                    
+                    // Prefer the known overlay class if it exists
+                    if (preferredOverlay && !preferredOverlay.contains(node) && node !== preferredOverlay) {
+                        // If we have a preferred overlay and this node isn't part of it, skip it
+                        // unless we haven't found any labels yet
+                        if (labels.length > 0) {
+                            continue;
+                        }
+                    }
+
+                    labels.push(text);
+                    seen.add(normalized);
                 }
             }
 
@@ -178,6 +265,8 @@ def _extract_cards_from_page(page: Page) -> list[dict[str, Any]]:
                     Math.max(rect.width, 1) *
                     Math.max(rect.height, 1);
 
+                // DEFENSIVE CHECK: Reject candidates with multiple distinct listing URLs
+                // This prevents selecting a parent container that includes neighboring cards
                 const valid =
                     urls.has(listingUrl) &&
                     urls.size === 1 &&
@@ -207,12 +296,21 @@ def _extract_cards_from_page(page: Page) -> list[dict[str, Any]]:
                 node = node.parentElement;
             }
 
-            return (
+            const chosenCard = (
                 best?.node ||
                 anchor.closest("article, li, [role='listitem']") ||
                 anchor.parentElement ||
                 anchor
             );
+            
+            // Final validation: ensure chosen card doesn't contain multiple listings
+            const finalUrls = uniqueListingUrls(chosenCard);
+            if (finalUrls.size > 1) {
+                // Fall back to a more conservative choice
+                return anchor.parentElement || anchor;
+            }
+            
+            return chosenCard;
         };
 
         const anchors = Array.from(
@@ -272,11 +370,14 @@ def _extract_cards_from_page(page: Page) -> list[dict[str, Any]]:
                 )
                 .find(Boolean) || "";
 
+            const cardUrls = uniqueListingUrls(card);
+            
             results.push({
                 url,
                 title,
                 cardText,
-                statusLabels: getStatusLabels(card)
+                statusLabels: getStatusLabels(card, url),
+                cardUrlCount: cardUrls.size
             });
 
             seenUrls.add(url);
@@ -346,6 +447,9 @@ def _merge_discovery(
 ) -> tuple[int, int]:
     new_count = 0
     updated_count = 0
+    
+    # Diagnostic counter for first 10 cards
+    diagnostic_count = 0
 
     for raw in raw_cards:
         url = canonicalize_listing_url(
@@ -379,6 +483,18 @@ def _merge_discovery(
             card_text=card_text[:2000],
             matched_status_text=availability.matched_text[:500],
         )
+        
+        # Diagnostic output for first 10 cards
+        if diagnostic_count < 10:
+            card_url_count = raw.get("cardUrlCount", "unknown")
+            print(f"\n[DIAGNOSTIC {diagnostic_count + 1}/10]")
+            print(f"  URL: {url}")
+            print(f"  Card URL count: {card_url_count}")
+            print(f"  Status labels: {status_labels if status_labels else '(none)'}")
+            print(f"  Classification: {availability.status.value} (available={availability.available})")
+            if availability.matched_text:
+                print(f"  Matched text: {availability.matched_text[:100]}")
+            diagnostic_count += 1
 
         existing = discovered.get(listing_id)
 
@@ -794,6 +910,71 @@ def discover_closet(
         print(f"Existing listings: {existing_listings_count}")
 
     return results
+
+
+def discover_closet_listings(
+    page: Page,
+    closet_url: str,
+    *,
+    max_scrolls: int = 600,
+    stable_rounds_required: int = 8,
+    scroll_pause_ms: int = 1200,
+    progress_path: Path | None = None,
+    downloads_dir: Path | None = None,
+    incremental_threshold: int = DEFAULT_INCREMENTAL_THRESHOLD,
+    max_new_listings: int | None = None,
+) -> DiscoveryResult:
+    """
+    Backward-compatible wrapper for the existing root scraper.py.
+
+    The newer discovery engine returns a list[DiscoveredListing].
+    The older root scraper expects:
+      - available_urls
+      - unavailable_cards
+      - total_cards
+
+    This wrapper provides that shape without changing the newer
+    discover_closet() implementation.
+    """
+    listings = discover_closet(
+        page,
+        closet_url,
+        max_scrolls=max_scrolls,
+        stable_rounds_required=stable_rounds_required,
+        scroll_pause_ms=scroll_pause_ms,
+        progress_path=progress_path,
+        downloads_dir=downloads_dir,
+        incremental_threshold=incremental_threshold,
+        max_new_listings=max_new_listings,
+    )
+
+    available_urls = [
+        item.url
+        for item in listings
+        if item.available
+    ]
+
+    unavailable_cards = [
+        UnavailableCard(
+            url=item.url,
+            status=item.card_status,
+            unavailable_reason=(
+                item.matched_status_text
+                or item.card_status
+                or None
+            ),
+            listing_id=item.listing_id,
+            title=item.title,
+        )
+        for item in listings
+        if not item.available
+    ]
+
+    return DiscoveryResult(
+        available_urls=available_urls,
+        unavailable_cards=unavailable_cards,
+        total_cards=len(listings),
+    )
 
 
 def save_discovery_results(
