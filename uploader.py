@@ -39,7 +39,7 @@ DESTINATION_CLOSET_URL = (
 )
 
 # Keep this low while testing.
-MAX_LISTINGS_PER_RUN = 10
+MAX_LISTINGS_PER_RUN = 25
 
 
 def print_listing_summary(
@@ -182,10 +182,22 @@ def fill_listing_form(
         listing["category"],
     )
 
-    fill_size(
-        page,
-        listing["size"],
-    )
+    category_value = str(
+        listing.get("category", "")
+    ).strip()
+
+    # Poshmark Home categories do not expose a Size control.
+    # Keep size handling strict everywhere else.
+    if category_value.casefold().startswith("home"):
+        print(
+            "Size not applicable for Home category; "
+            "skipping size selection."
+        )
+    else:
+        fill_size(
+            page,
+            listing["size"],
+        )
 
     fill_condition(
         page,

@@ -9,6 +9,7 @@ CONDITION_ALIASES = {
     "excellent": "Like New",
     "like new": "Like New",
     "good": "Good",
+    "good used condition": "Good",
     "fair": "Fair",
 }
 

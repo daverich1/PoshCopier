@@ -21,6 +21,9 @@ PRESET_TABS = (
     "Petite",
     "Juniors",
     "Maternity",
+    "Baby",
+    "Girls",
+    "Boys",
 )
 
 
@@ -334,10 +337,24 @@ def find_size_picker(page: Page) -> Locator | None:
                 candidate.inner_text()
             )
 
-            if (
+            has_adult_tabs = (
                 "standard" in text
                 and "custom" in text
-                and "done" in text
+            )
+
+            has_kids_tabs = (
+                "baby" in text
+                and "girls" in text
+                and "boys" in text
+                and "custom" in text
+            )
+
+            if (
+                "done" in text
+                and (
+                    has_adult_tabs
+                    or has_kids_tabs
+                )
             ):
                 return candidate
 
@@ -515,6 +532,144 @@ def select_tab(
     except Exception:
         return False
 
+
+
+def picker_has_tab(
+    picker: Locator,
+    tab_name: str,
+) -> bool:
+    return (
+        find_exact_visible_text_in(
+            picker,
+            tab_name,
+        )
+        is not None
+    )
+
+
+def is_kids_shoe_picker(
+    picker: Locator,
+) -> bool:
+    """
+    Kids Shoes/Sneakers picker shown in the user's recording:
+    Baby | Girls | Boys | Custom
+    """
+    return all(
+        picker_has_tab(
+            picker,
+            tab_name,
+        )
+        for tab_name in (
+            "Baby",
+            "Girls",
+            "Boys",
+            "Custom",
+        )
+    )
+
+
+def parse_kids_tab_hint(
+    size_value: str,
+) -> tuple[str | None, str]:
+    """
+    Preserve a source-provided Kids tab hint when one exists.
+
+    Examples:
+      "Baby 4"  -> ("Baby", "4")
+      "Girls 7" -> ("Girls", "7")
+      "Boys 6"  -> ("Boys", "6")
+      "7"       -> (None, "7")
+
+    Ambiguous numeric sizes intentionally return no tab hint so we do not
+    guess Baby/Girls/Boys. Those go through Custom instead.
+    """
+    value = size_value.strip()
+
+    match = re.fullmatch(
+        r"\s*(baby|girls?|boys?)\s+(.+?)\s*",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return None, value
+
+    raw_tab = normalize_text(
+        match.group(1)
+    )
+
+    tab_name = {
+        "baby": "Baby",
+        "girl": "Girls",
+        "girls": "Girls",
+        "boy": "Boys",
+        "boys": "Boys",
+    }[raw_tab]
+
+    return (
+        tab_name,
+        match.group(2).strip(),
+    )
+
+
+def find_kids_size_or_use_custom(
+    page: Page,
+    picker: Locator,
+    original_size: str,
+) -> Locator | None:
+    """
+    Safe Kids Shoes behavior:
+    - If the source explicitly says Baby/Girls/Boys, select that tab and
+      try the exact preset there.
+    - If the source is ambiguous (for example just "7"), do NOT guess a
+      tab. Return None so fill_size() uses Custom and preserves the source.
+    """
+    tab_hint, size_text = parse_kids_tab_hint(
+        original_size
+    )
+
+    if tab_hint is None:
+        print(
+            "Kids shoe size has no Baby/Girls/Boys "
+            "tab hint. Using Custom to avoid guessing."
+        )
+        return None
+
+    tab = find_exact_visible_text_in(
+        picker,
+        tab_hint,
+    )
+
+    if tab is None:
+        print(
+            f"Kids size tab {tab_hint} was not found. "
+            "Using Custom."
+        )
+        return None
+
+    click_safely(
+        tab
+    )
+    page.wait_for_timeout(
+        500
+    )
+
+    option = find_exact_visible_text_in(
+        picker,
+        size_text,
+    )
+
+    if option is not None:
+        print(
+            f"Kids size found under tab: {tab_hint}"
+        )
+        return option
+
+    print(
+        f"Kids size {size_text} not found under "
+        f"{tab_hint}. Using Custom."
+    )
+    return None
 
 def find_size_in_presets(
     page: Page,
@@ -887,81 +1042,138 @@ def fill_size(
             "container could not be identified."
         )
 
-    if parsed.region:
-        select_sizing_region(
-            page,
-            picker,
-            parsed.region,
-        )
-
-        page.wait_for_timeout(
-            500
-        )
-
-        refreshed_picker = find_size_picker(
-            page
-        )
-
-        if refreshed_picker is not None:
-            picker = refreshed_picker
-
-    option = find_size_in_presets(
-        page,
-        parsed,
-        picker,
+    kids_picker = is_kids_shoe_picker(
+        picker
     )
 
-    if option is not None:
-        try:
-            selected_text = (
-                option.inner_text().strip()
+    if kids_picker:
+        print(
+            "Kids Shoes size picker detected."
+        )
+
+        option = find_kids_size_or_use_custom(
+            page,
+            picker,
+            parsed.original,
+        )
+
+        if option is not None:
+            try:
+                selected_text = (
+                    option.inner_text().strip()
+                )
+            except Exception:
+                selected_text = parsed.original
+
+            click_safely(
+                option
             )
-        except Exception:
-            selected_text = (
-                f"{parsed.region} {parsed.base}"
-                if parsed.region
+
+            print(
+                "Size selected:",
+                selected_text
+                or parsed.original,
+            )
+
+        else:
+            # For an ambiguous Kids size, preserve exactly what came from
+            # the source listing rather than guessing Baby/Girls/Boys.
+            custom_value = parsed.original
+
+            print(
+                "Using Kids Custom size:",
+                custom_value,
+            )
+
+            if not fill_custom_size(
+                page,
+                custom_value,
+            ):
+                raise RuntimeError(
+                    "Could not open the Custom size tab."
+                )
+
+    else:
+        if parsed.region:
+            select_sizing_region(
+                page,
+                picker,
+                parsed.region,
+            )
+
+            page.wait_for_timeout(
+                500
+            )
+
+            refreshed_picker = find_size_picker(
+                page
+            )
+
+            if refreshed_picker is not None:
+                picker = refreshed_picker
+
+        option = find_size_in_presets(
+            page,
+            parsed,
+            picker,
+        )
+
+        if option is not None:
+            try:
+                selected_text = (
+                    option.inner_text().strip()
+                )
+            except Exception:
+                selected_text = (
+                    f"{parsed.region} {parsed.base}"
+                    if parsed.region
+                    else parsed.base
+                )
+
+            click_safely(
+                option
+            )
+
+            print(
+                "Size selected:",
+                selected_text
+                or parsed.base,
+            )
+
+        else:
+            print(
+                "Preset size not found. "
+                "Using Custom size."
+            )
+
+            custom_value = (
+                parsed.base + parsed.width
+                if parsed.width
                 else parsed.base
             )
 
-        click_safely(
-            option
-        )
-
-        print(
-            "Size selected:",
-            selected_text or parsed.base,
-        )
-
-    else:
-        print(
-            "Preset size not found. "
-            "Using Custom size."
-        )
-
-        custom_value = (
-            parsed.base + parsed.width
-            if parsed.width
-            else parsed.base
-        )
-
-        if not fill_custom_size(
-            page,
-            custom_value,
-        ):
-            raise RuntimeError(
-                "Could not open the Custom size tab."
-            )
+            if not fill_custom_size(
+                page,
+                custom_value,
+            ):
+                raise RuntimeError(
+                    "Could not open the Custom size tab."
+                )
 
     page.wait_for_timeout(
         500
     )
 
-    if click_done(page):
+    if click_done(
+        page
+    ):
         print(
             "Size picker closed using Done."
         )
     else:
-        page.keyboard.press("Escape")
+        page.keyboard.press(
+            "Escape"
+        )
         print(
             "Size picker closed using Escape."
         )
@@ -970,10 +1182,19 @@ def fill_size(
         800
     )
 
-    if picker_is_open(page):
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(400)
+    if picker_is_open(
+        page
+    ):
+        page.keyboard.press(
+            "Escape"
+        )
+        page.wait_for_timeout(
+            400
+        )
 
+    # Custom Kids sizes can be rendered differently by Poshmark. Verify the
+    # final control using the original source text plus the normal parser
+    # variants.
     if not verify_selected(
         page,
         parsed,
@@ -985,5 +1206,7 @@ def fill_size(
             "be verified."
         )
 
-    print("Size confirmed.")
+    print(
+        "Size confirmed."
+    )
 

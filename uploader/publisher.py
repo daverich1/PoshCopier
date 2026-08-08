@@ -112,6 +112,212 @@ def find_publish_button(
     return None
 
 
+
+def confirm_oversized_item_warning(page: Page) -> bool:
+    """
+    Detect and confirm Poshmark's specific "Problem Detected" oversized-item
+    warning after the normal publish click.
+
+    Safety:
+    - Requires oversized-item warning evidence.
+    - Clicks only an exact "Publish Listing" button.
+    - Never clicks Delete Listing.
+    """
+    warning_phrases = (
+        "potential oversized item",
+        "currently do not support items that surpass",
+        "packages over 5 lbs",
+        "maximum weight our labels support is 10 lbs",
+    )
+
+    # Give the modal time to render. Poshmark can display it asynchronously.
+    for attempt in range(1, 9):
+        page.wait_for_timeout(750)
+
+        try:
+            body_text = normalize_text(
+                page.locator("body").inner_text()
+            )
+        except Exception:
+            body_text = ""
+
+        warning_detected = any(
+            phrase in body_text
+            for phrase in warning_phrases
+        )
+
+        # Prefer a visible dialog/modal container if one exists.
+        dialog = find_visible(
+            page.locator(
+                '[role="dialog"], '
+                '[data-test*="modal" i], '
+                '[class*="modal" i]'
+            )
+        )
+
+        if dialog is not None:
+            try:
+                dialog_text = normalize_text(
+                    dialog.inner_text()
+                )
+            except Exception:
+                dialog_text = ""
+
+            if any(
+                phrase in dialog_text
+                for phrase in warning_phrases
+            ):
+                warning_detected = True
+
+        if not warning_detected:
+            continue
+
+        print(
+            "Potential oversized item warning detected."
+        )
+
+        # Search the modal first, then the page as a fallback.
+        button = None
+
+        if dialog is not None:
+            try:
+                button = find_visible(
+                    dialog.get_by_role(
+                        "button",
+                        name="Publish Listing",
+                        exact=True,
+                    )
+                )
+            except Exception:
+                button = None
+
+            if button is None:
+                try:
+                    button = find_visible(
+                        dialog.locator(
+                            'button:has-text("Publish Listing")'
+                        )
+                    )
+                except Exception:
+                    button = None
+
+        if button is None:
+            button = find_visible(
+                page.get_by_role(
+                    "button",
+                    name="Publish Listing",
+                    exact=True,
+                )
+            )
+
+        if button is None:
+            button = find_visible(
+                page.locator(
+                    'button:has-text("Publish Listing")'
+                )
+            )
+
+        if button is None:
+            raise RuntimeError(
+                "The oversized-item warning was detected, "
+                "but its Publish Listing button could not be found."
+            )
+
+        print(
+            "Confirming oversized-item warning with Publish Listing..."
+        )
+
+        button.scroll_into_view_if_needed()
+        button.click()
+
+        print(
+            "Oversized-item warning confirmed."
+        )
+
+        # Poshmark then opens a second confirmation dialog titled
+        # "Publish Listing" with Cancel / Publish buttons.
+        page.wait_for_timeout(500)
+
+        second_dialog = None
+
+        for _ in range(8):
+            page.wait_for_timeout(500)
+
+            dialogs = page.locator(
+                '[role="dialog"], '
+                '[data-test*="modal" i], '
+                '[class*="modal" i]'
+            )
+
+            for index in range(dialogs.count()):
+                candidate = dialogs.nth(index)
+
+                try:
+                    if not candidate.is_visible():
+                        continue
+
+                    dialog_text = normalize_text(
+                        candidate.inner_text()
+                    )
+
+                    if (
+                        "publish listing" in dialog_text
+                        and "cancel" in dialog_text
+                        and "publish" in dialog_text
+                    ):
+                        second_dialog = candidate
+                        break
+
+                except Exception:
+                    continue
+
+            if second_dialog is not None:
+                break
+
+        if second_dialog is None:
+            raise RuntimeError(
+                "The oversized-item confirmation was clicked, "
+                "but the second Publish Listing dialog did not appear."
+            )
+
+        second_publish_button = find_visible(
+            second_dialog.get_by_role(
+                "button",
+                name="Publish",
+                exact=True,
+            )
+        )
+
+        if second_publish_button is None:
+            second_publish_button = find_visible(
+                second_dialog.locator(
+                    'button:text-is("Publish")'
+                )
+            )
+
+        if second_publish_button is None:
+            raise RuntimeError(
+                "The second Publish Listing dialog appeared, "
+                "but its Publish button could not be found."
+            )
+
+        print(
+            "Second Publish Listing confirmation detected. "
+            "Clicking Publish..."
+        )
+
+        second_publish_button.scroll_into_view_if_needed()
+        second_publish_button.click()
+
+        print(
+            "Second Publish confirmation clicked."
+        )
+
+        page.wait_for_timeout(1500)
+        return True
+
+    return False
+
 def collect_listing_links(
     page: Page,
 ) -> list[str]:
@@ -331,6 +537,16 @@ def publish_listing(
         publish_button.click()
 
         print("Final publish button clicked.")
+
+        oversized_confirmed = confirm_oversized_item_warning(
+            page
+        )
+
+        if oversized_confirmed:
+            print(
+                "Continuing publish verification after "
+                "oversized-item confirmation."
+            )
 
         # TEMPORARY TEST HOOK - REMOVE AFTER TASK-023D-P1 VALIDATION
         if FORCE_PUBLISH_VERIFICATION_FAILURE:
