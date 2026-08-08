@@ -275,7 +275,8 @@ def process_one_listing(
 
     destination_url = publish_listing(
         page,
-        listing["title"],
+        listing,
+        DESTINATION_CLOSET_URL,
     )
 
     mark_listing_copied(

@@ -100,6 +100,94 @@ def title_similarity(
     ).ratio()
 
 
+
+def _ensure_destination_filter_selected(
+    page: Page,
+    selector: str,
+    label: str,
+) -> bool:
+    """Select and verify one destination-closet radio filter."""
+    try:
+        radio = page.locator(selector).first
+
+        if radio.count() == 0:
+            print(f"Warning: {label} filter control not found.")
+            return False
+
+        if radio.is_checked(timeout=1500):
+            print(f"{label} filter already selected.")
+            return True
+
+        # Prefer clicking the associated label because Poshmark may visually
+        # hide the native radio input.
+        radio_id = radio.get_attribute("id")
+
+        if radio_id:
+            label_locator = page.locator(
+                f'label[for="{radio_id}"]'
+            ).first
+
+            if label_locator.count() > 0:
+                label_locator.click(timeout=5000)
+            else:
+                radio.check(force=True, timeout=5000)
+        else:
+            radio.check(force=True, timeout=5000)
+
+        page.wait_for_timeout(800)
+
+        if radio.is_checked(timeout=1500):
+            print(f"{label} filter applied.")
+            return True
+
+    except Exception as error:
+        print(
+            f"Warning: Could not apply {label} filter:",
+            error,
+        )
+
+    return False
+
+
+def _apply_destination_closet_filters(
+    page: Page,
+) -> bool:
+    """
+    Force the destination closet scan to Available + Active items only.
+
+    Returns True only when both radio controls are confirmed selected.
+    """
+    availability_selector = (
+        'input[name="availability"][value="available"]'
+    )
+    status_selector = (
+        'input[name="status"][value="active"]'
+    )
+
+    availability_success = _ensure_destination_filter_selected(
+        page,
+        availability_selector,
+        "Available Items",
+    )
+
+    status_success = _ensure_destination_filter_selected(
+        page,
+        status_selector,
+        "Active Items",
+    )
+
+    if not availability_success:
+        print(
+            "Warning: Available Items filter could not be verified."
+        )
+
+    if not status_success:
+        print(
+            "Warning: Active Items filter could not be verified."
+        )
+
+    return availability_success and status_success
+
 def collect_destination_listing_urls(
     page: Page,
     closet_url: str,
@@ -110,14 +198,41 @@ def collect_destination_listing_urls(
         "for existing listings..."
     )
 
+    # Start with explicit query parameters so the destination closet is
+    # requested in Available + Active mode even before UI verification.
+    separator = "&" if "?" in closet_url else "?"
+    filtered_closet_url = (
+        f"{closet_url}{separator}"
+        "availability=available&status=active"
+    )
+
     page.goto(
-        closet_url,
+        filtered_closet_url,
         wait_until="domcontentloaded",
     )
 
     page.wait_for_timeout(
         4000
     )
+
+    filters_verified = _apply_destination_closet_filters(
+        page
+    )
+
+    if not filters_verified:
+        raise RuntimeError(
+            "Destination closet scan stopped because Available Items "
+            "and Active Items filters could not both be verified."
+        )
+
+    print(
+        "Destination closet filters verified: "
+        "Available Items + Active Items"
+    )
+
+    # Return to the top before collecting/scanning listing cards.
+    page.evaluate("() => window.scrollTo(0, 0)")
+    page.wait_for_timeout(1000)
 
     previous_count = 0
     stable_rounds = 0
