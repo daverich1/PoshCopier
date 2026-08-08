@@ -207,7 +207,7 @@ class PoshmarkShareEngine:
             elapsed = time.time() - start_time
             
             if success:
-                print(f"  ✓ Share successful ({elapsed:.1f}s)")
+                print(f"  [OK] Share successful ({elapsed:.1f}s)")
                 return ShareResult(
                     success=True,
                     shared=1,
@@ -395,6 +395,409 @@ class PoshmarkShareEngine:
         # Default: assume success if no error detected
         return True
     
+    def share_listing_to_party(
+        self,
+        listing: ShareableListing,
+        party: any,  # PoshParty type
+        retry: bool = True,
+    ) -> ShareResult:
+        """
+        Share a single listing to a specific Posh Party.
+        
+        HARD GATES:
+        - listing must be AVAILABLE
+        - listing must be ACTIVE
+        - party must be is_live == True
+        - listing must be ELIGIBLE for party
+        
+        Args:
+            listing: Listing to share (must include availability, active status)
+            party: Live party to share to
+            retry: Whether to retry once on transient failures
+        
+        Returns:
+            ShareResult with success/failure status
+        """
+        print(f"\nSharing listing to party: {listing.title}")
+        print(f"  Listing ID: {listing.listing_id}")
+        print(f"  Listing URL: {listing.url}")
+        print(f"  Party: {party.name} (ID: {party.party_id})")
+        
+        start_time = time.time()
+        
+        # GATE 1: Availability
+        if not listing.available:
+            print(f"  GATE FAILED: Listing is not available")
+            return ShareResult(
+                success=False,
+                failed=1,
+                errors=[ShareError(
+                    error_type=ShareErrorType.LISTING_UNAVAILABLE,
+                    message="Listing is not available",
+                    listing_id=listing.listing_id,
+                    recoverable=False,
+                )],
+                elapsed_seconds=time.time() - start_time,
+                message="Listing not available",
+                party_id=party.party_id,
+                party_name=party.name,
+            )
+        
+        # GATE 2: Party is live
+        if not party.is_live:
+            print(f"  GATE FAILED: Party is not live")
+            return ShareResult(
+                success=False,
+                failed=1,
+                errors=[ShareError(
+                    error_type=ShareErrorType.PARTY_NOT_LIVE,
+                    message=f"Party '{party.name}' is not currently live",
+                    listing_id=listing.listing_id,
+                    recoverable=False,
+                )],
+                elapsed_seconds=time.time() - start_time,
+                message="Party not live",
+                party_id=party.party_id,
+                party_name=party.name,
+            )
+        
+        print(f"  [OK] Availability: AVAILABLE")
+        print(f"  [OK] Party Live: True")
+        
+        try:
+            # Open share modal from closet
+            print("  Opening share modal from closet...")
+            if not self._open_share_modal_from_closet(listing.listing_id):
+                return ShareResult(
+                    success=False,
+                    failed=1,
+                    errors=[ShareError(
+                        error_type=ShareErrorType.MODAL_NOT_FOUND,
+                        message="Could not open share modal",
+                        listing_id=listing.listing_id,
+                        recoverable=True,
+                    )],
+                    elapsed_seconds=time.time() - start_time,
+                    message="Modal not found",
+                    party_id=party.party_id,
+                    party_name=party.name,
+                )
+            
+            # Detect Posh Shows (log only)
+            if self._detect_posh_shows_destination():
+                print("  [INFO] Posh Shows Host destination detected (will not click)")
+            
+            # Find party destination
+            print(f"  Looking for party destination: {party.name}...")
+            party_dest = self._find_party_destination(party.party_id, party.name)
+            
+            if party_dest is None:
+                print(f"  FAILED: Party destination not found in modal")
+                return ShareResult(
+                    success=False,
+                    failed=1,
+                    errors=[ShareError(
+                        error_type=ShareErrorType.PARTY_DESTINATION_NOT_FOUND,
+                        message=f"Party destination not found in modal",
+                        listing_id=listing.listing_id,
+                        recoverable=True,
+                    )],
+                    elapsed_seconds=time.time() - start_time,
+                    message="Party destination not found",
+                    party_id=party.party_id,
+                    party_name=party.name,
+                )
+            
+            # Verify destination
+            print("  Verifying party destination...")
+            if not self._verify_party_destination(party_dest, party.name):
+                print(f"  FAILED: Party destination verification failed")
+                return ShareResult(
+                    success=False,
+                    failed=1,
+                    errors=[ShareError(
+                        error_type=ShareErrorType.PARTY_DESTINATION_NOT_FOUND,
+                        message="Party destination verification failed",
+                        listing_id=listing.listing_id,
+                        recoverable=True,
+                    )],
+                    elapsed_seconds=time.time() - start_time,
+                    message="Destination verification failed",
+                    party_id=party.party_id,
+                    party_name=party.name,
+                )
+            
+            print(f"  [OK] Party destination found and verified")
+            
+            # Click party destination
+            print(f"  Clicking party destination...")
+            party_dest.click()
+            
+            # Detect success
+            success, success_msg = self._detect_share_success()
+            
+            elapsed = time.time() - start_time
+            
+            if success:
+                print(f"  [OK] SUCCESS: {success_msg} ({elapsed:.1f}s)")
+                return ShareResult(
+                    success=True,
+                    shared=1,
+                    elapsed_seconds=elapsed,
+                    message=success_msg,
+                    party_id=party.party_id,
+                    party_name=party.name,
+                )
+            else:
+                print(f"  ? UNKNOWN: {success_msg} ({elapsed:.1f}s)")
+                return ShareResult(
+                    success=False,
+                    failed=1,
+                    errors=[ShareError(
+                        error_type=ShareErrorType.PARTY_SHARE_FAILED,
+                        message=success_msg,
+                        listing_id=listing.listing_id,
+                        recoverable=False,
+                    )],
+                    elapsed_seconds=elapsed,
+                    message=success_msg,
+                    party_id=party.party_id,
+                    party_name=party.name,
+                )
+        
+        except Exception as e:
+            elapsed = time.time() - start_time
+            error_msg = f"Unexpected error: {str(e)}"
+            print(f"  ERROR: {error_msg}")
+            
+            return ShareResult(
+                success=False,
+                failed=1,
+                errors=[ShareError(
+                    error_type=ShareErrorType.UNKNOWN,
+                    message=error_msg,
+                    listing_id=listing.listing_id,
+                    recoverable=True,
+                )],
+                elapsed_seconds=elapsed,
+                message=error_msg,
+                party_id=party.party_id,
+                party_name=party.name,
+            )
+    
+    def _open_share_modal_from_closet(self, listing_id: str) -> bool:
+        """
+        Open share modal from closet card.
+        
+        Args:
+            listing_id: ID of listing to share
+        
+        Returns:
+            True if modal opened successfully, False otherwise
+        """
+        try:
+            # Navigate to closet
+            self.page.goto(
+                self.config.closet_url,
+                wait_until="domcontentloaded",
+                timeout=15000,
+            )
+            self.page.wait_for_timeout(3000)
+            
+            # Find all share buttons
+            share_buttons = self.page.locator("div.share-v2.cursor--pointer").all()
+            
+            if not share_buttons:
+                print("    No share buttons found in closet")
+                return False
+            
+            # Find the correct share button by checking parent tile
+            target_button = None
+            for button in share_buttons:
+                try:
+                    # Check if this button's parent tile contains a link to our listing
+                    parent_tile = button.locator("xpath=ancestor::div[contains(@class, 'tile')]").first
+                    tile_links = parent_tile.locator("a.tile__covershot").all()
+                    
+                    for link in tile_links:
+                        href = link.get_attribute("href") or ""
+                        if listing_id in href:
+                            target_button = button
+                            break
+                    
+                    if target_button:
+                        break
+                except:
+                    continue
+            
+            if not target_button:
+                print(f"    Share button not found for listing {listing_id}")
+                return False
+            
+            # Click share button
+            target_button.scroll_into_view_if_needed()
+            self.page.wait_for_timeout(500)
+            target_button.click()
+            
+            # Wait for modal
+            self.page.wait_for_selector(
+                "[data-test='listing-share-modal-container']",
+                timeout=10000
+            )
+            self.page.wait_for_timeout(2000)
+            
+            return True
+        
+        except Exception as e:
+            print(f"    Error opening share modal: {e}")
+            return False
+    
+    def _find_party_destination(self, party_id: str, party_name: str) -> any:
+        """
+        Find party destination in share modal.
+        
+        Selector strategy:
+        1. Primary: a[data-et-name="share_to_party"][data-et-prop-party_id="{party_id}"]
+        2. Fallback: a[data-et-name="share_to_party"] + verify party_id attribute
+        3. Last resort: text match on party_name
+        
+        Args:
+            party_id: Party ID to find
+            party_name: Party name for verification
+        
+        Returns:
+            Locator for party destination, or None if not found
+        """
+        try:
+            # Scope to modal
+            modal = self.page.locator('[data-test="listing-share-modal-container"]')
+            
+            # Primary selector
+            selector = f'a[data-et-name="share_to_party"][data-et-prop-party_id="{party_id}"]'
+            element = modal.locator(selector)
+            
+            if element.count() > 0:
+                print(f"    Found via primary selector")
+                return element.first
+            
+            # Fallback: verify party_id in attributes
+            elements = modal.locator('a[data-et-name="share_to_party"]').all()
+            for elem in elements:
+                if elem.get_attribute('data-et-prop-party_id') == party_id:
+                    print(f"    Found via fallback selector (party_id match)")
+                    return elem
+            
+            # Last resort: text match (logged as fallback)
+            text_selector = f'a[data-et-name="share_to_party"]:has-text("{party_name}")'
+            element = modal.locator(text_selector)
+            if element.count() > 0:
+                print(f"    Found via text match fallback (less stable)")
+                return element.first
+            
+            return None
+        
+        except Exception as e:
+            print(f"    Error finding party destination: {e}")
+            return None
+    
+    def _detect_posh_shows_destination(self) -> bool:
+        """
+        Detect if Posh Shows Host destination is present.
+        
+        Returns:
+            True if Posh Shows destination found, False otherwise
+        """
+        try:
+            modal = self.page.locator('[data-test="listing-share-modal-container"]')
+            posh_shows = modal.locator('a:has-text("Share to Posh Shows Host")')
+            
+            return posh_shows.count() > 0
+        
+        except Exception:
+            return False
+    
+    def _verify_party_destination(self, element: any, party_name: str) -> bool:
+        """
+        Verify party destination before clicking.
+        
+        Checks:
+        - Element is visible
+        - Party name matches (case-insensitive)
+        - Not disabled
+        
+        Args:
+            element: Locator for party destination
+            party_name: Expected party name
+        
+        Returns:
+            True if safe to click, False otherwise
+        """
+        try:
+            # Check visible
+            if not element.is_visible():
+                print(f"    Verification failed: element not visible")
+                return False
+            
+            # Check party name (case-insensitive)
+            text = element.text_content() or ""
+            if party_name.lower() not in text.lower():
+                print(f"    Verification failed: party name mismatch")
+                print(f"      Expected: '{party_name}'")
+                print(f"      Got: '{text}'")
+                return False
+            
+            # Check not disabled
+            if element.get_attribute('aria-disabled') == 'true':
+                print(f"    Verification failed: element is disabled")
+                return False
+            
+            return True
+        
+        except Exception as e:
+            print(f"    Verification error: {e}")
+            return False
+    
+    def _detect_share_success(self) -> tuple[bool, str]:
+        """
+        Detect if share was successful after clicking destination.
+        
+        Checks:
+        - Modal closed
+        - Success toast/message
+        - Other UI state changes
+        
+        Returns:
+            (success: bool, message: str)
+        """
+        # Wait briefly for UI response
+        self.page.wait_for_timeout(1500)
+        
+        # Check if modal closed
+        try:
+            modal = self.page.locator('[data-test="listing-share-modal-container"]')
+            if modal.count() == 0:
+                return (True, "Modal closed after share")
+        except:
+            pass
+        
+        # Check for success toast/message
+        success_indicators = [
+            'text=/shared/i',
+            'text=/success/i',
+            '[class*="success"]',
+            '[class*="toast"]'
+        ]
+        
+        for selector in success_indicators:
+            try:
+                if self.page.locator(selector).count() > 0:
+                    return (True, "Success indicator found")
+            except:
+                pass
+        
+        # No reliable signal
+        return (False, "UNKNOWN - no success indicator detected")
+    
     def pause(self) -> None:
         """Request pause after current share completes."""
         self._paused = True
@@ -423,3 +826,4 @@ class PoshmarkShareEngine:
         
         print(f"  Waiting {total_delay:.1f}s before next share...")
         time.sleep(total_delay)
+

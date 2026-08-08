@@ -48,6 +48,12 @@ class ShareErrorType(str, Enum):
     RATE_LIMITED = "RATE_LIMITED"
     CHALLENGE = "CHALLENGE"
     
+    # Party sharing errors
+    PARTY_NOT_LIVE = "PARTY_NOT_LIVE"
+    PARTY_NOT_ELIGIBLE = "PARTY_NOT_ELIGIBLE"
+    PARTY_DESTINATION_NOT_FOUND = "PARTY_DESTINATION_NOT_FOUND"
+    PARTY_SHARE_FAILED = "PARTY_SHARE_FAILED"
+    
     # Unknown - log and skip
     UNKNOWN = "UNKNOWN"
 
@@ -94,3 +100,9 @@ class ShareResult:
     errors: list[ShareError] = field(default_factory=list)
     elapsed_seconds: float = 0.0
     message: str = ""
+    
+    # Party sharing metadata
+    party_id: str | None = None
+    party_name: str | None = None
+    eligibility_status: str | None = None
+    eligibility_reason: str | None = None

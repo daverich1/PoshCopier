@@ -18,6 +18,9 @@ class ShareConfig:
         stop_on_failures: Stop after N consecutive failures (default: 5)
         share_timeout_seconds: Timeout for single share operation (default: 15.0)
         modal_timeout_seconds: Timeout for modal interactions (default: 10.0)
+        share_to_parties: Enable party sharing (default: False)
+        share_to_posh_shows: Enable Posh Shows sharing (default: False)
+        party_share_limit: Maximum party shares per run (default: 1 for safety)
     """
     
     closet_url: str
@@ -27,6 +30,9 @@ class ShareConfig:
     stop_on_failures: int = 5
     share_timeout_seconds: float = 15.0
     modal_timeout_seconds: float = 10.0
+    share_to_parties: bool = False
+    share_to_posh_shows: bool = False
+    party_share_limit: int | None = 1
     
     def __post_init__(self) -> None:
         """Validate configuration values."""
@@ -47,3 +53,6 @@ class ShareConfig:
         
         if self.modal_timeout_seconds <= 0:
             raise ValueError("modal_timeout_seconds must be positive")
+        
+        if self.party_share_limit is not None and self.party_share_limit < 1:
+            raise ValueError("party_share_limit must be at least 1 or None")
