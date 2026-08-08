@@ -39,7 +39,7 @@ DESTINATION_CLOSET_URL = (
 )
 
 # Keep this low while testing.
-MAX_LISTINGS_PER_RUN = 3
+MAX_LISTINGS_PER_RUN = 10
 
 
 def print_listing_summary(
