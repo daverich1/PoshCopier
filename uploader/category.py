@@ -235,27 +235,49 @@ def fill_category(
                 f"-> {ui_subcategory}"
             )
 
-        for attempt in range(1, 3):
-            page.wait_for_timeout(2000)
+        subcategory_options = [ui_subcategory]
 
-            subcategory_control = find_subcategory_control(
-                page
-            )
+        if ui_subcategory != subcategory:
+            subcategory_options.append(subcategory)
 
-            try:
-                open_and_select(
-                    page,
-                    subcategory_control,
-                    ui_subcategory,
+        selected = False
+        last_error = None
+
+        for option in subcategory_options:
+            for attempt in range(1, 3):
+                page.wait_for_timeout(2000)
+
+                subcategory_control = find_subcategory_control(
+                    page
                 )
+
+                try:
+                    open_and_select(
+                        page,
+                        subcategory_control,
+                        option,
+                    )
+                    selected = True
+                    break
+                except RuntimeError as error:
+                    last_error = error
+
+                    if attempt < 2:
+                        print(
+                            "Subcategory option was not ready; retrying..."
+                        )
+
+            if selected:
                 break
-            except RuntimeError:
-                if attempt == 2:
-                    raise
 
+            if option != subcategory:
                 print(
-                    "Subcategory option was not ready; retrying..."
+                    f"Mapped subcategory unavailable; "
+                    f"trying {subcategory}."
                 )
+
+        if not selected and last_error is not None:
+            raise last_error
 
         # We intentionally do NOT verify the text here.
         # The screenshots show the dropdown is selecting
