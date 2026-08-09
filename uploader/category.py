@@ -34,6 +34,11 @@ KNOWN_CATEGORIES = (
     "Tops",
 )
 
+SUBCATEGORY_UI_ALIASES = {
+    "Sandals": "Sandals & Flip-Flops",
+}
+
+
 KNOWN_SUBCATEGORIES = (
     "Cardigans",
     "Cowl & Turtlenecks",
@@ -223,10 +228,21 @@ def fill_category(
             page
         )
 
+        ui_subcategory = SUBCATEGORY_UI_ALIASES.get(
+            subcategory,
+            subcategory,
+        )
+
+        if ui_subcategory != subcategory:
+            print(
+                f"Subcategory mapped: {subcategory} "
+                f"-> {ui_subcategory}"
+            )
+
         open_and_select(
             page,
             subcategory_control,
-            subcategory,
+            ui_subcategory,
         )
 
         # We intentionally do NOT verify the text here.
