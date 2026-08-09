@@ -14,6 +14,7 @@ from typing import Union
 from dashboard.activity_log import ActivityLog
 from dashboard.inventory_panel import InventoryPanel
 from dashboard.recovery_panel import RecoveryPanel
+from dashboard.sharing_panel import SharingPanel
 from dashboard.upload_queue_panel import UploadQueuePanel
 from dashboard.controls import ControlsPanel
 from dashboard.pipeline_io import (
@@ -134,6 +135,10 @@ class PoshCopierDashboard:
             notebook,
             padding=0,
         )
+        sharing_tab = ttk.Frame(
+            notebook,
+            padding=0,
+        )
 
         notebook.add(
             pipeline_tab,
@@ -150,6 +155,10 @@ class PoshCopierDashboard:
         notebook.add(
             recovery_tab,
             text="Recovery",
+        )
+        notebook.add(
+            sharing_tab,
+            text="Sharing",
         )
         settings = ttk.LabelFrame(
             pipeline_tab,
@@ -524,6 +533,14 @@ class PoshCopierDashboard:
             recovery_tab
         )
         self.recovery_panel.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self.sharing_panel = SharingPanel(
+            sharing_tab
+        )
+        self.sharing_panel.pack(
             fill="both",
             expand=True,
         )
@@ -1515,5 +1532,20 @@ class PoshCopierDashboard:
                 self.process.terminate()
             except Exception:
                 pass
+
+        if (
+            hasattr(self, "sharing_panel")
+            and self.sharing_panel.is_running
+        ):
+            confirmed = messagebox.askyesno(
+                "Sharing Running",
+                (
+                    "Follower sharing is still running.\n\n"
+                    "Stop after the current share and close the dashboard?"
+                ),
+            )
+            if not confirmed:
+                return
+            self.sharing_panel.shutdown()
 
         self.root.destroy()

@@ -185,6 +185,9 @@ def main():
                 url=eligible_listing,
                 title=eligible_data.get('title', 'Unknown'),
                 available=True,
+                active=True,
+                party_eligible=True,
+                eligibility_reason=eligible_data['eligibility'].reason,
             )
             
             # STEP 4: Initialize share engine

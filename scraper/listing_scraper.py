@@ -402,6 +402,8 @@ def extract_category_from_breadcrumb(page: Page) -> str | None:
 def scrape_listing(
     page: Page,
     listing_url: str,
+    *,
+    download_images: bool = True,
 ) -> dict:
     page.goto(
         listing_url,
@@ -534,7 +536,7 @@ def scrape_listing(
         ),
     }
 
-    if not availability.available:
+    if not availability.available or not download_images:
         return listing
 
     local_images = download_listing_images(

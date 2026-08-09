@@ -29,12 +29,18 @@ class ShareableListing:
         url: Full URL to listing
         title: Listing title
         available: Whether listing is available for sale
+        active: Confirmed active status, or None if unchecked
+        party_eligible: Confirmed party eligibility, or None if unchecked
+        eligibility_reason: Human-readable party eligibility explanation
     """
     
     listing_id: str
     url: str
     title: str
     available: bool = True
+    active: bool | None = None
+    party_eligible: bool | None = None
+    eligibility_reason: str = ""
 
 
 class PoshmarkShareEngine:
@@ -71,6 +77,178 @@ class PoshmarkShareEngine:
         
         # Timing
         self.start_time = 0.0
+
+    def _emit_progress(self, progress: ShareProgress) -> None:
+        """Send a progress snapshot without letting UI errors stop sharing."""
+        if self.progress_callback is None:
+            return
+
+        try:
+            self.progress_callback(progress)
+        except Exception as error:
+            print(f"Progress callback failed: {error}")
+
+    def share_batch(self, listings: list[ShareableListing]) -> ShareResult:
+        """Share a rate-limited batch of available listings to followers."""
+        selected = list(listings)
+        if self.config.max_shares is not None:
+            selected = selected[:self.config.max_shares]
+
+        return self._run_batch(
+            selected,
+            operation=self.share_listing,
+            destination="followers",
+        )
+
+    def share_batch_to_party(
+        self,
+        listings: list[ShareableListing],
+        party: any,
+    ) -> ShareResult:
+        """Share an explicitly limited batch to one live Posh Party."""
+        if not self.config.share_to_parties:
+            return ShareResult(
+                success=False,
+                failed=1,
+                errors=[ShareError(
+                    error_type=ShareErrorType.PARTY_SHARE_FAILED,
+                    message="Party sharing is disabled in ShareConfig",
+                    recoverable=False,
+                )],
+                message="Party sharing disabled",
+                party_id=getattr(party, "party_id", None),
+                party_name=getattr(party, "name", None),
+            )
+
+        selected = list(listings)
+        if self.config.party_share_limit is not None:
+            selected = selected[:self.config.party_share_limit]
+
+        return self._run_batch(
+            selected,
+            operation=lambda listing: self.share_listing_to_party(
+                listing,
+                party,
+            ),
+            destination=f"party {party.name}",
+        )
+
+    def _run_batch(
+        self,
+        listings: list[ShareableListing],
+        operation: Callable[[ShareableListing], ShareResult],
+        destination: str,
+    ) -> ShareResult:
+        """Coordinate a batch with progress, pause, stop, and failure limits."""
+        total = len(listings)
+        shared = 0
+        skipped = 0
+        failed = 0
+        errors: list[ShareError] = []
+        consecutive_failures = 0
+        self.start_time = time.time()
+        self._stop_requested = False
+
+        self._emit_progress(ShareProgress(
+            status=ShareStatus.SHARING,
+            total=total,
+            message=f"Starting {destination} sharing",
+        ))
+
+        for index, listing in enumerate(listings, 1):
+            self._wait_while_paused()
+            if self._stop_requested:
+                break
+
+            if not listing.available:
+                skipped += 1
+                self._emit_batch_progress(
+                    ShareStatus.SHARING, index, total, listing,
+                    shared, skipped, failed, "Skipped unavailable listing",
+                )
+                continue
+
+            result = operation(listing)
+            shared += result.shared
+            skipped += result.skipped
+            failed += result.failed
+            errors.extend(result.errors)
+
+            if result.success:
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+
+            self._emit_batch_progress(
+                ShareStatus.SHARING, index, total, listing,
+                shared, skipped, failed, result.message,
+            )
+
+            if consecutive_failures >= self.config.stop_on_failures:
+                break
+
+            if index < total and not self._stop_requested:
+                self._apply_delay()
+
+        elapsed = time.time() - self.start_time
+        completed = shared + skipped + failed
+        stopped_early = completed < total
+        success = failed == 0 and not stopped_early
+        message = "Sharing stopped" if stopped_early else "Sharing complete"
+        status = ShareStatus.COMPLETE if success else ShareStatus.FAILED
+
+        self._emit_progress(ShareProgress(
+            status=status,
+            current=completed,
+            total=total,
+            message=message,
+            shared=shared,
+            skipped=skipped,
+            failed=failed,
+            elapsed_seconds=elapsed,
+            eta_seconds=0.0,
+        ))
+
+        return ShareResult(
+            success=success,
+            shared=shared,
+            skipped=skipped,
+            failed=failed,
+            errors=errors,
+            elapsed_seconds=elapsed,
+            message=message,
+        )
+
+    def _emit_batch_progress(
+        self,
+        status: ShareStatus,
+        current: int,
+        total: int,
+        listing: ShareableListing,
+        shared: int,
+        skipped: int,
+        failed: int,
+        message: str,
+    ) -> None:
+        """Build and emit one batch progress snapshot."""
+        elapsed = time.time() - self.start_time
+        eta = None
+        if current > 0:
+            eta = max(0.0, (elapsed / current) * (total - current))
+
+        self._emit_progress(ShareProgress(
+            status=status,
+            current=current,
+            total=total,
+            message=message,
+            listing_id=listing.listing_id,
+            listing_title=listing.title,
+            shared=shared,
+            skipped=skipped,
+            failed=failed,
+            elapsed_seconds=elapsed,
+            eta_seconds=eta,
+        ))
     
     def open_closet(self) -> None:
         """
@@ -119,47 +297,19 @@ class PoshmarkShareEngine:
         print(f"  URL: {listing.url}")
         
         start_time = time.time()
-        
+
         try:
-            # Navigate to the listing page
-            print("  Navigating to listing...")
-            self.page.goto(
-                listing.url,
-                wait_until="domcontentloaded",
-                timeout=self.config.share_timeout_seconds * 1000,
-            )
-            
-            # Wait for page to stabilize
-            self.page.wait_for_timeout(2000)
-            
-            # Check for login redirect
-            if "/login" in self.page.url or "/signin" in self.page.url:
-                return ShareResult(
-                    success=False,
-                    failed=1,
-                    errors=[ShareError(
-                        error_type=ShareErrorType.LOGIN_EXPIRED,
-                        message="Session expired - redirected to login",
-                        listing_id=listing.listing_id,
-                        recoverable=False,
-                    )],
-                    elapsed_seconds=time.time() - start_time,
-                    message="Session expired",
-                )
-            
-            # Find and click the share button
-            print("  Looking for share button...")
-            share_button = self._find_share_button()
-            
-            if share_button is None:
-                error_msg = "Share button not found on listing page"
+            # Open the confirmed closet-card share modal.
+            print("  Opening share modal from closet...")
+            if not self._open_share_modal_from_closet(listing.listing_id):
+                error_msg = "Share modal not found for closet listing"
                 print(f"  ERROR: {error_msg}")
-                
+
                 return ShareResult(
                     success=False,
                     failed=1,
                     errors=[ShareError(
-                        error_type=ShareErrorType.SHARE_BUTTON_NOT_FOUND,
+                        error_type=ShareErrorType.MODAL_NOT_FOUND,
                         message=error_msg,
                         listing_id=listing.listing_id,
                         recoverable=True,
@@ -167,13 +317,7 @@ class PoshmarkShareEngine:
                     elapsed_seconds=time.time() - start_time,
                     message=error_msg,
                 )
-            
-            print("  Clicking share button...")
-            share_button.click()
-            
-            # Wait for share modal to appear
-            self.page.wait_for_timeout(1500)
-            
+
             # Find and click "Share to My Followers" option
             print("  Looking for 'Share to My Followers' option...")
             followers_option = self._find_share_to_followers_option()
@@ -322,7 +466,25 @@ class PoshmarkShareEngine:
         Returns:
             Locator for followers option, or None if not found
         """
-        # Strategy 1: Look for button/link with "Followers" text
+        # Strategy 1: Confirmed closet-modal destination selector
+        try:
+            modal = self.page.locator('[data-test="listing-share-modal-container"]')
+            option = modal.locator('a[data-et-name="share_poshmark"]')
+            if option.count() > 0 and option.first.is_visible():
+                return option.first
+        except Exception:
+            pass
+
+        # Strategy 2: Current visible destination label
+        try:
+            modal = self.page.locator('[data-test="listing-share-modal-container"]')
+            option = modal.locator('a:has-text("To My Followers")')
+            if option.count() > 0 and option.first.is_visible():
+                return option.first
+        except Exception:
+            pass
+
+        # Strategy 3: Look for button/link with legacy text
         try:
             option = self.page.get_by_role("button", name="Share to My Followers")
             if option.count() > 0 and option.first.is_visible():
@@ -330,7 +492,7 @@ class PoshmarkShareEngine:
         except Exception:
             pass
         
-        # Strategy 2: Look for any element with "Followers" text
+        # Strategy 4: Look for any element with "Followers" text
         try:
             option = self.page.locator('text="Share to My Followers"').first
             if option.is_visible():
@@ -338,7 +500,7 @@ class PoshmarkShareEngine:
         except Exception:
             pass
         
-        # Strategy 3: Look for element containing "Followers" (partial match)
+        # Strategy 5: Look for element containing "Followers" (partial match)
         try:
             option = self.page.locator('[role="button"]:has-text("Followers")').first
             if option.is_visible():
@@ -346,7 +508,7 @@ class PoshmarkShareEngine:
         except Exception:
             pass
         
-        # Strategy 4: Look for clickable element with "followers" in text (case-insensitive)
+        # Strategy 6: Look for clickable element with "followers" in text (case-insensitive)
         try:
             option = self.page.locator('*:has-text("followers")').first
             if option.is_visible():
@@ -377,7 +539,7 @@ class PoshmarkShareEngine:
         # Strategy 2: Check if modal is dismissed (share completed)
         try:
             # If modal is gone, assume success
-            modal = self.page.locator('[role="dialog"]').first
+            modal = self.page.locator('[data-test="listing-share-modal-container"]').first
             if not modal.is_visible(timeout=2000):
                 return True
         except Exception:
@@ -424,6 +586,24 @@ class PoshmarkShareEngine:
         print(f"  Party: {party.name} (ID: {party.party_id})")
         
         start_time = time.time()
+
+        # GATE 0: Party sharing must be explicitly enabled
+        if not self.config.share_to_parties:
+            print("  GATE FAILED: Party sharing is disabled")
+            return ShareResult(
+                success=False,
+                failed=1,
+                errors=[ShareError(
+                    error_type=ShareErrorType.PARTY_SHARE_FAILED,
+                    message="Party sharing is disabled in ShareConfig",
+                    listing_id=listing.listing_id,
+                    recoverable=False,
+                )],
+                elapsed_seconds=time.time() - start_time,
+                message="Party sharing disabled",
+                party_id=party.party_id,
+                party_name=party.name,
+            )
         
         # GATE 1: Availability
         if not listing.available:
@@ -443,7 +623,46 @@ class PoshmarkShareEngine:
                 party_name=party.name,
             )
         
-        # GATE 2: Party is live
+        # GATE 2: Active status
+        if listing.active is not True:
+            print("  GATE FAILED: Listing active status was not confirmed")
+            return ShareResult(
+                success=False,
+                failed=1,
+                errors=[ShareError(
+                    error_type=ShareErrorType.LISTING_UNAVAILABLE,
+                    message="Listing active status was not confirmed",
+                    listing_id=listing.listing_id,
+                    recoverable=False,
+                )],
+                elapsed_seconds=time.time() - start_time,
+                message="Listing not active",
+                party_id=party.party_id,
+                party_name=party.name,
+            )
+
+        # GATE 3: Eligibility must be explicitly confirmed
+        if listing.party_eligible is not True:
+            reason = listing.eligibility_reason or "Party eligibility was not confirmed"
+            print(f"  GATE FAILED: {reason}")
+            return ShareResult(
+                success=False,
+                failed=1,
+                errors=[ShareError(
+                    error_type=ShareErrorType.PARTY_NOT_ELIGIBLE,
+                    message=reason,
+                    listing_id=listing.listing_id,
+                    recoverable=False,
+                )],
+                elapsed_seconds=time.time() - start_time,
+                message="Listing not eligible for party",
+                party_id=party.party_id,
+                party_name=party.name,
+                eligibility_status="NOT_ELIGIBLE",
+                eligibility_reason=reason,
+            )
+
+        # GATE 4: Party is live
         if not party.is_live:
             print(f"  GATE FAILED: Party is not live")
             return ShareResult(
@@ -462,6 +681,8 @@ class PoshmarkShareEngine:
             )
         
         print(f"  [OK] Availability: AVAILABLE")
+        print(f"  [OK] Active: True")
+        print(f"  [OK] Party Eligibility: ELIGIBLE")
         print(f"  [OK] Party Live: True")
         
         try:
@@ -604,31 +825,39 @@ class PoshmarkShareEngine:
             )
             self.page.wait_for_timeout(3000)
             
-            # Find all share buttons
-            share_buttons = self.page.locator("div.share-v2.cursor--pointer").all()
-            
-            if not share_buttons:
-                print("    No share buttons found in closet")
-                return False
-            
-            # Find the correct share button by checking parent tile
             target_button = None
-            for button in share_buttons:
+            previous_link_count = -1
+            unchanged_passes = 0
+
+            for _ in range(40):
                 try:
-                    # Check if this button's parent tile contains a link to our listing
-                    parent_tile = button.locator("xpath=ancestor::div[contains(@class, 'tile')]").first
-                    tile_links = parent_tile.locator("a.tile__covershot").all()
-                    
-                    for link in tile_links:
-                        href = link.get_attribute("href") or ""
-                        if listing_id in href:
+                    link = self.page.locator(
+                        f'a.tile__covershot[href*="{listing_id}"]'
+                    ).first
+                    if link.count() > 0:
+                        parent_tile = link.locator(
+                            "xpath=ancestor::div[contains(@class, 'tile')]"
+                        ).first
+                        button = parent_tile.locator(
+                            "div.share-v2.cursor--pointer"
+                        ).first
+                        if button.count() > 0:
                             target_button = button
                             break
-                    
-                    if target_button:
+
+                    link_count = self.page.locator("a.tile__covershot").count()
+                    if link_count == previous_link_count:
+                        unchanged_passes += 1
+                    else:
+                        unchanged_passes = 0
+                    previous_link_count = link_count
+                    if unchanged_passes >= 3:
                         break
-                except:
-                    continue
+
+                    self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    self.page.wait_for_timeout(1000)
+                except Exception:
+                    break
             
             if not target_button:
                 print(f"    Share button not found for listing {listing_id}")
@@ -802,11 +1031,21 @@ class PoshmarkShareEngine:
         """Request pause after current share completes."""
         self._paused = True
         print("Pause requested")
+        self._emit_progress(ShareProgress(
+            status=ShareStatus.PAUSED,
+            message="Sharing paused",
+            elapsed_seconds=max(0.0, time.time() - self.start_time),
+        ))
     
     def resume(self) -> None:
         """Resume from paused state."""
         self._paused = False
         print("Resumed")
+        self._emit_progress(ShareProgress(
+            status=ShareStatus.SHARING,
+            message="Sharing resumed",
+            elapsed_seconds=max(0.0, time.time() - self.start_time),
+        ))
     
     def request_stop_after_current(self) -> None:
         """Request stop after current share completes."""

@@ -223,6 +223,14 @@ def is_listing_eligible_for_party(
                 matched = True
                 matched_field = "category"
                 matched_value = listing_category
+
+        if not matched and listing_department and listing_category:
+            combined_category = f"{listing_department} {listing_category}"
+            combined_normalized = normalize_text(combined_category)
+            if combined_normalized in categories_allowed:
+                matched = True
+                matched_field = "category"
+                matched_value = combined_category
         
         if not matched and listing_subcategory:
             subcat_normalized = normalize_text(listing_subcategory)

@@ -133,7 +133,8 @@ class PartyManager:
                     }
                     seenUrls.add(url);
                     
-                    // Find containing card - walk up to find smallest container with THIS party link + time
+                    // Find the smallest card containing only this party link.
+                    // Upcoming cards expose a time; live cards expose live-status text.
                     let card = link;
                     let foundCard = false;
                     
@@ -143,13 +144,18 @@ class PartyManager:
                         
                         const cardText = card.textContent || '';
                         const hasTime = /\\d{1,2}:\\d{2}\\s*(AM|PM)/i.test(cardText);
+                        const hasLiveStatus = /ends in|live now|happening now|currently live/i.test(cardText);
                         
                         // Check if this card contains ONLY this party link (not multiple)
                         const partyLinksInCard = card.querySelectorAll('a[href*="/party/"]');
                         const thisLinkInCard = Array.from(partyLinksInCard).some(l => l.href === url);
                         
-                        // Found card if it contains time, this link, and ideally only this link
-                        if (hasTime && thisLinkInCard) {
+                        const containsOnlyThisParty =
+                            partyLinksInCard.length > 0
+                            && Array.from(partyLinksInCard).every(l => l.href === url);
+
+                        // Requiring one party link prevents section-level metadata leakage.
+                        if ((hasTime || hasLiveStatus) && thisLinkInCard && containsOnlyThisParty) {
                             foundCard = true;
                             break;
                         }
