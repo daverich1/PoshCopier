@@ -41,6 +41,12 @@ DESTINATION_CLOSET_URL = (
 # Keep this low while testing.
 MAX_LISTINGS_PER_RUN = 50
 
+# Faster timing profile for throughput testing.
+# Set to False to restore the conservative waits.
+FAST_MODE = True
+CREATE_LISTING_WAIT_MS = 2000 if FAST_MODE else 5000
+BETWEEN_LISTINGS_WAIT_MS = 750 if FAST_MODE else 2500
+
 def print_listing_summary(
     listing_file,
     listing: dict,
@@ -140,7 +146,7 @@ def fill_listing_form(
     )
 
     page.wait_for_timeout(
-        5000
+        CREATE_LISTING_WAIT_MS
     )
 
     print(
@@ -373,7 +379,7 @@ def main() -> None:
                     )
 
                     page.wait_for_timeout(
-                        2500
+                        BETWEEN_LISTINGS_WAIT_MS
                     )
 
                 except RuntimeError as error:

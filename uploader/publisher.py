@@ -7,6 +7,14 @@ from playwright.sync_api import Locator, Page
 # TEMPORARY TEST HOOK - REMOVE AFTER TASK-023D-P1 VALIDATION
 FORCE_PUBLISH_VERIFICATION_FAILURE = False
 
+# Faster timing profile for throughput testing.
+# Safety checks, duplicate protection, and all verification attempts stay enabled.
+FAST_MODE = True
+NEXT_WAIT_MS = 1250 if FAST_MODE else 2500
+POST_PUBLISH_WAIT_MS = 4000 if FAST_MODE else 8000
+VERIFY_DELAYS_MS = (1000, 1000, 1500) if FAST_MODE else (2000, 2000, 3000)
+SCROLL_WAIT_MS = 600 if FAST_MODE else 1000
+
 
 class PublishUnverifiedException(Exception):
     """
@@ -63,7 +71,7 @@ def click_next(page: Page) -> None:
         button.scroll_into_view_if_needed()
         button.click()
 
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(NEXT_WAIT_MS)
 
         print("Next clicked.")
         return
@@ -406,7 +414,7 @@ def load_fresh_listings_with_scroll(
             """
         )
         
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(SCROLL_WAIT_MS)
     
     # Final collection after scrolling
     return collect_listing_links(page)
@@ -444,14 +452,9 @@ def find_published_listing(
             timeout=30000,
         )
         
-        # Wait for propagation (longer on later attempts)
-        if attempt == 1:
-            delay = 2000
-        elif attempt == 2:
-            delay = 2000
-        else:  # attempt 3
-            delay = 3000
-        
+        # Wait for propagation (longer on later attempts).
+        # Fast mode shortens waits but keeps all 3 verification attempts.
+        delay = VERIFY_DELAYS_MS[attempt - 1]
         page.wait_for_timeout(delay)
         
         # Determine target count based on attempt
@@ -554,7 +557,7 @@ def publish_listing(
                 "TEST ONLY: Forced post-publish verification failure"
             )
 
-        page.wait_for_timeout(8000)
+        page.wait_for_timeout(POST_PUBLISH_WAIT_MS)
 
         current_url = page.url
 
