@@ -326,6 +326,151 @@ def confirm_oversized_item_warning(page: Page) -> bool:
 
     return False
 
+
+def confirm_fragile_item_warning(page: Page) -> bool:
+    """Confirm Poshmark's fragile-item warning after Publish is clicked."""
+    warning_phrases = (
+        "fragile item detected",
+        "potential breakable item",
+        "when shipping fragile items",
+    )
+
+    for _ in range(8):
+        page.wait_for_timeout(500)
+
+        dialog = find_visible(
+            page.locator(
+                '[role="dialog"], '
+                '[data-test*="modal" i], '
+                '[class*="modal" i]'
+            )
+        )
+
+        if dialog is None:
+            continue
+
+        try:
+            dialog_text = normalize_text(
+                dialog.inner_text()
+            )
+        except Exception:
+            continue
+
+        if not any(
+            phrase in dialog_text
+            for phrase in warning_phrases
+        ):
+            continue
+
+        print("Fragile item warning detected.")
+
+        button = find_visible(
+            dialog.get_by_role(
+                "button",
+                name="Publish Listing",
+                exact=True,
+            )
+        )
+
+        if button is None:
+            button = find_visible(
+                dialog.locator(
+                    'button:text-is("Publish Listing")'
+                )
+            )
+
+        if button is None:
+            raise RuntimeError(
+                "The fragile-item warning was detected, "
+                "but its Publish Listing button could not be found."
+            )
+
+        print(
+            "Confirming fragile-item warning with Publish Listing..."
+        )
+
+        button.scroll_into_view_if_needed()
+        button.click()
+
+        print("Fragile-item warning confirmed.")
+
+        second_dialog = None
+
+        for _ in range(8):
+            page.wait_for_timeout(500)
+
+            dialogs = page.locator(
+                '[role="dialog"], '
+                '[data-test*="modal" i], '
+                '[class*="modal" i]'
+            )
+
+            for index in range(dialogs.count()):
+                candidate = dialogs.nth(index)
+
+                try:
+                    if not candidate.is_visible():
+                        continue
+
+                    candidate_text = normalize_text(
+                        candidate.inner_text()
+                    )
+
+                    if (
+                        "publish listing" in candidate_text
+                        and "by publishing this listing" in candidate_text
+                        and "not be compensating me" in candidate_text
+                    ):
+                        second_dialog = candidate
+                        break
+
+                except Exception:
+                    continue
+
+            if second_dialog is not None:
+                break
+
+        if second_dialog is None:
+            raise RuntimeError(
+                "The fragile-item warning was confirmed, "
+                "but its final Publish dialog did not appear."
+            )
+
+        final_publish_button = find_visible(
+            second_dialog.get_by_role(
+                "button",
+                name="Publish",
+                exact=True,
+            )
+        )
+
+        if final_publish_button is None:
+            final_publish_button = find_visible(
+                second_dialog.locator(
+                    'button:text-is("Publish")'
+                )
+            )
+
+        if final_publish_button is None:
+            raise RuntimeError(
+                "The final fragile-item Publish dialog appeared, "
+                "but its Publish button could not be found."
+            )
+
+        print(
+            "Final fragile-item confirmation detected. "
+            "Clicking Publish..."
+        )
+
+        final_publish_button.scroll_into_view_if_needed()
+        final_publish_button.click()
+
+        print("Final fragile-item Publish clicked.")
+        page.wait_for_timeout(1500)
+        return True
+
+    return False
+
 def collect_listing_links(
     page: Page,
 ) -> list[str]:
@@ -549,6 +694,16 @@ def publish_listing(
             print(
                 "Continuing publish verification after "
                 "oversized-item confirmation."
+            )
+
+        fragile_confirmed = confirm_fragile_item_warning(
+            page
+        )
+
+        if fragile_confirmed:
+            print(
+                "Continuing publish verification after "
+                "fragile-item confirmation."
             )
 
         # TEMPORARY TEST HOOK - REMOVE AFTER TASK-023D-P1 VALIDATION

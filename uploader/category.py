@@ -22,6 +22,7 @@ KNOWN_CATEGORIES = (
     "Jackets & Coats",
     "Accessories",
     "Sweaters",
+    "Dining",
     "Dresses",
     "Makeup",
     "Shorts",
@@ -51,6 +52,7 @@ KNOWN_SUBCATEGORIES = (
     "Sandals",
     "Heels",
     "Flats & Loafers",
+    "Drinkware",
 )
 
 
@@ -222,12 +224,6 @@ def fill_category(
         )
 
     if subcategory:
-        page.wait_for_timeout(1200)
-
-        subcategory_control = find_subcategory_control(
-            page
-        )
-
         ui_subcategory = SUBCATEGORY_UI_ALIASES.get(
             subcategory,
             subcategory,
@@ -239,11 +235,27 @@ def fill_category(
                 f"-> {ui_subcategory}"
             )
 
-        open_and_select(
-            page,
-            subcategory_control,
-            ui_subcategory,
-        )
+        for attempt in range(1, 3):
+            page.wait_for_timeout(2000)
+
+            subcategory_control = find_subcategory_control(
+                page
+            )
+
+            try:
+                open_and_select(
+                    page,
+                    subcategory_control,
+                    ui_subcategory,
+                )
+                break
+            except RuntimeError:
+                if attempt == 2:
+                    raise
+
+                print(
+                    "Subcategory option was not ready; retrying..."
+                )
 
         # We intentionally do NOT verify the text here.
         # The screenshots show the dropdown is selecting

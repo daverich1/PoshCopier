@@ -39,7 +39,7 @@ DESTINATION_CLOSET_URL = (
 )
 
 # Keep this low while testing.
-MAX_LISTINGS_PER_RUN = 50
+MAX_LISTINGS_PER_RUN = 1
 
 # Faster timing profile for throughput testing.
 # Set to False to restore the conservative waits.

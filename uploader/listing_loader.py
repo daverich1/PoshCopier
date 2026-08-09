@@ -1,5 +1,5 @@
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from data.database.database import (
     listing_already_copied,
@@ -79,6 +79,7 @@ def get_image_paths(
     listing: dict,
 ) -> list[str]:
     image_paths = []
+    listing_id = listing.get("listing_id")
 
     # New format
     saved_images = listing.get("local_images")
@@ -95,10 +96,24 @@ def get_image_paths(
 
         if path.exists():
             image_paths.append(str(path))
-        else:
-            print(
-                "Missing image file:",
-                path,
-            )
+            continue
+
+        filename = PureWindowsPath(
+            saved_path
+        ).name
+        fallback_path = (
+            DOWNLOADS_DIR
+            / str(listing_id)
+            / filename
+        )
+
+        if listing_id and fallback_path.exists():
+            image_paths.append(str(fallback_path))
+            continue
+
+        print(
+            "Missing image file:",
+            path,
+        )
 
     return image_paths
