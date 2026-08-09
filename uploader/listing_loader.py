@@ -1,5 +1,5 @@
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from data.database.database import (
     listing_already_copied,
@@ -78,7 +78,10 @@ def find_next_uncopied_listing_file() -> Path:
 def get_image_paths(
     listing: dict,
 ) -> list[str]:
-    image_paths = []
+    image_paths: list[str] = []
+    seen_paths: set[Path] = set()
+    listing_id = str(listing.get("listing_id", "")).strip()
+    listing_dir = DOWNLOADS_DIR / listing_id if listing_id else None
 
     # New format
     saved_images = listing.get("local_images")
@@ -93,12 +96,31 @@ def get_image_paths(
     for saved_path in saved_images:
         path = Path(saved_path)
 
-        if path.exists():
-            image_paths.append(str(path))
+        resolved_path = path
+        if not resolved_path.exists() and listing_dir is not None:
+            filename = (
+                PureWindowsPath(saved_path).name
+                if "\\" in str(saved_path)
+                else path.name
+            )
+            portable_path = listing_dir / filename
+            if portable_path.exists():
+                resolved_path = portable_path
+
+        if resolved_path.exists():
+            canonical = resolved_path.resolve()
+            if canonical not in seen_paths:
+                seen_paths.add(canonical)
+                image_paths.append(str(resolved_path))
         else:
             print(
                 "Missing image file:",
                 path,
             )
+
+    if not image_paths and listing_dir is not None and listing_dir.exists():
+        for path in sorted(listing_dir.glob("image_*.*")):
+            if path.is_file():
+                image_paths.append(str(path))
 
     return image_paths
