@@ -11,7 +11,8 @@ from sharing.share_config import ShareConfig
 from sharing.share_engine import PoshmarkShareEngine
 from sharing.share_progress import ShareProgress, ShareResult, ShareStatus
 from sharing.party_runner import run_party_candidate
-from sharing.share_runner import run_follower_sharing
+from sharing.follow_runner import run_follow_backs
+from sharing.share_runner import run_community_sharing, run_follower_sharing
 
 
 DESTINATION_CLOSET_URL = "https://poshmark.com/closet/dveshop"
@@ -33,6 +34,9 @@ class SharingPanel(ttk.Frame):
         self.eta_var = tk.StringVar(value="—")
         self.party_name_var = tk.StringVar(value="")
         self.party_listing_url_var = tk.StringVar(value="")
+        self.community_closet_url_var = tk.StringVar(value="")
+        self.community_count_var = tk.StringVar(value="1")
+        self.follow_back_count_var = tk.StringVar(value="1")
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._engine: PoshmarkShareEngine | None = None
@@ -144,6 +148,65 @@ class SharingPanel(ttk.Frame):
             text="Validation is read-only. Live sharing requires confirmation and is limited to one listing.",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
+        community = ttk.LabelFrame(self, text="Community Sharing", padding=12)
+        community.pack(fill="x", pady=(12, 0))
+        community.columnconfigure(1, weight=1)
+        ttk.Label(community, text="Other seller's closet URL:").grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=4,
+        )
+        ttk.Entry(community, textvariable=self.community_closet_url_var).grid(
+            row=0, column=1, columnspan=3, sticky="ew", pady=4,
+        )
+        ttk.Label(community, text="Maximum shares:").grid(
+            row=1, column=0, sticky="w", padx=(0, 8), pady=4,
+        )
+        ttk.Entry(community, textvariable=self.community_count_var, width=10).grid(
+            row=1, column=1, sticky="w", pady=4,
+        )
+        self.validate_community_button = ttk.Button(
+            community,
+            text="Validate Listings",
+            command=self.validate_community_listings,
+        )
+        self.validate_community_button.grid(row=1, column=2, padx=(12, 8), pady=4)
+        self.share_community_button = ttk.Button(
+            community,
+            text="Share Community Listings",
+            command=self.share_community_listings,
+        )
+        self.share_community_button.grid(row=1, column=3, sticky="e", pady=4)
+        ttk.Label(
+            community,
+            text="Validation is read-only. Live runs require confirmation and only use unique listings from another closet.",
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        follow_backs = ttk.LabelFrame(self, text="Follow Backs", padding=12)
+        follow_backs.pack(fill="x", pady=(12, 0))
+        ttk.Label(follow_backs, text="Maximum follow-backs:").grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=4,
+        )
+        ttk.Entry(
+            follow_backs,
+            textvariable=self.follow_back_count_var,
+            width=10,
+        ).grid(row=0, column=1, sticky="w", pady=4)
+        self.validate_follow_backs_button = ttk.Button(
+            follow_backs,
+            text="Validate Candidates",
+            command=self.validate_follow_backs,
+        )
+        self.validate_follow_backs_button.grid(row=0, column=2, padx=(12, 8), pady=4)
+        self.run_follow_backs_button = ttk.Button(
+            follow_backs,
+            text="Follow Back",
+            command=self.start_follow_backs,
+        )
+        self.run_follow_backs_button.grid(row=0, column=3, pady=4)
+        ttk.Label(
+            follow_backs,
+            text="Only followers with an exact Follow control are candidates. Existing Following accounts are never clicked.",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
@@ -192,6 +255,130 @@ class SharingPanel(ttk.Frame):
                 engine_callback=lambda value: self._events.put(("engine", value)),
             )
             self._events.put(("result", result))
+        except Exception as error:
+            self._events.put(("error", str(error)))
+
+    def validate_community_listings(self) -> None:
+        self._start_community_sharing(perform_share=False)
+
+    def share_community_listings(self) -> None:
+        self._start_community_sharing(perform_share=True)
+
+    def _start_community_sharing(self, *, perform_share: bool) -> None:
+        if self.is_running:
+            return
+        closet_url = self.community_closet_url_var.get().strip()
+        try:
+            count = int(self.community_count_var.get().strip())
+            delay = float(self.delay_var.get().strip())
+        except ValueError:
+            messagebox.showerror("Invalid Settings", "Count must be whole and delay numeric.")
+            return
+        if not closet_url or count < 1 or count > 50 or delay < 0:
+            messagebox.showerror(
+                "Invalid Community Settings",
+                "Enter another seller's closet URL, a count from 1 to 50, and a non-negative delay.",
+            )
+            return
+        if perform_share and not messagebox.askyesno(
+            "Confirm Community Sharing",
+            f"Share up to {count} unique listing(s) from this closet to your followers?\n\n{closet_url}",
+        ):
+            return
+
+        self._reset_progress()
+        self._set_running(True)
+        self.status_var.set(
+            "Sharing community listings" if perform_share else "Validating community listings"
+        )
+        config = ShareConfig(
+            closet_url=closet_url,
+            delay_seconds=delay,
+            max_shares=count,
+            share_community_listings=perform_share,
+            community_share_limit=count,
+        )
+        self._thread = threading.Thread(
+            target=self._run_community_worker,
+            args=(config, perform_share),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run_community_worker(
+        self,
+        config: ShareConfig,
+        perform_share: bool,
+    ) -> None:
+        try:
+            result = run_community_sharing(
+                config,
+                DESTINATION_CLOSET_URL,
+                perform_share=perform_share,
+                progress_callback=lambda value: self._events.put(("progress", value)),
+                engine_callback=lambda value: self._events.put(("engine", value)),
+            )
+            self._events.put(("community_result", (perform_share, result)))
+        except Exception as error:
+            self._events.put(("error", str(error)))
+
+    def validate_follow_backs(self) -> None:
+        self._start_follow_backs(perform_follow=False)
+
+    def start_follow_backs(self) -> None:
+        self._start_follow_backs(perform_follow=True)
+
+    def _start_follow_backs(self, *, perform_follow: bool) -> None:
+        if self.is_running:
+            return
+        try:
+            count = int(self.follow_back_count_var.get().strip())
+            delay = float(self.delay_var.get().strip())
+        except ValueError:
+            messagebox.showerror("Invalid Settings", "Count must be whole and delay numeric.")
+            return
+        if count < 1 or count > 50 or delay < 0:
+            messagebox.showerror(
+                "Invalid Follow-Back Settings",
+                "Count must be 1–50 and delay cannot be negative.",
+            )
+            return
+        if perform_follow and not messagebox.askyesno(
+            "Confirm Follow Backs",
+            f"Follow back up to {count} confirmed follower(s)?",
+        ):
+            return
+
+        self._reset_progress()
+        self._set_running(True)
+        self.status_var.set("Following back" if perform_follow else "Validating followers")
+        config = ShareConfig(
+            closet_url=DESTINATION_CLOSET_URL,
+            delay_seconds=delay,
+            follow_backs_enabled=perform_follow,
+            follow_back_limit=count,
+        )
+        self._thread = threading.Thread(
+            target=self._run_follow_back_worker,
+            args=(config, perform_follow),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run_follow_back_worker(
+        self,
+        config: ShareConfig,
+        perform_follow: bool,
+    ) -> None:
+        try:
+            result = run_follow_backs(
+                config,
+                "dveshop",
+                perform_follow=perform_follow,
+                progress_callback=lambda value: self._events.put(("progress", value)),
+                engine_callback=lambda value: self._events.put(("engine", value)),
+            )
+            self._events.put(("follow_back_result", (perform_follow, result)))
         except Exception as error:
             self._events.put(("error", str(error)))
 
@@ -257,6 +444,12 @@ class SharingPanel(ttk.Frame):
                 elif event == "party_result":
                     perform_share, result = value  # type: ignore[misc]
                     self._finish_party(bool(perform_share), result)
+                elif event == "community_result":
+                    perform_share, result = value  # type: ignore[misc]
+                    self._finish_community(bool(perform_share), result)
+                elif event == "follow_back_result":
+                    perform_follow, result = value  # type: ignore[misc]
+                    self._finish_follow_backs(bool(perform_follow), result)
                 elif event == "error":
                     self._append(f"ERROR: {value}")
                     self.status_var.set("Failed")
@@ -307,6 +500,26 @@ class SharingPanel(ttk.Frame):
         self._set_running(False)
         self._engine = None
 
+    def _finish_community(self, performed_share: bool, result: ShareResult) -> None:
+        action = "Community sharing" if performed_share else "Community validation"
+        self._append(f"{action}: {result.message}")
+        self.status_var.set("Complete" if result.success else "Failed")
+        if result.success and not performed_share:
+            self.progress_var.set(100.0)
+            self.progress_text_var.set(f"{result.skipped} candidate(s) validated")
+        self._set_running(False)
+        self._engine = None
+
+    def _finish_follow_backs(self, performed_follow: bool, result: ShareResult) -> None:
+        action = "Follow-backs" if performed_follow else "Follow-back validation"
+        self._append(f"{action}: {result.message}")
+        self.status_var.set("Complete" if result.success else "Failed")
+        if result.success and not performed_follow:
+            self.progress_var.set(100.0)
+            self.progress_text_var.set(f"{result.skipped} candidate(s) validated")
+        self._set_running(False)
+        self._engine = None
+
     def pause(self) -> None:
         if self._engine is not None:
             self._engine.pause()
@@ -340,6 +553,10 @@ class SharingPanel(ttk.Frame):
         party_state = "disabled" if running else "normal"
         self.validate_party_button.configure(state=party_state)
         self.share_party_button.configure(state=party_state)
+        self.validate_community_button.configure(state=party_state)
+        self.share_community_button.configure(state=party_state)
+        self.validate_follow_backs_button.configure(state=party_state)
+        self.run_follow_backs_button.configure(state=party_state)
 
     def _reset_progress(self) -> None:
         self.progress_var.set(0.0)

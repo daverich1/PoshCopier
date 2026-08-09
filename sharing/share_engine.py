@@ -43,6 +43,21 @@ class ShareableListing:
     eligibility_reason: str = ""
 
 
+@dataclass
+class FollowCandidate:
+    """A confirmed follower who is not currently followed back."""
+
+    username: str
+    url: str
+    title: str
+    available: bool = True
+
+    @property
+    def listing_id(self) -> str:
+        """Expose a stable identifier for shared batch progress handling."""
+        return self.username
+
+
 class PoshmarkShareEngine:
     """
     Manages sharing of Poshmark listings to followers.
@@ -100,6 +115,112 @@ class PoshmarkShareEngine:
             destination="followers",
         )
 
+    def share_community_batch(
+        self,
+        listings: list[ShareableListing],
+    ) -> ShareResult:
+        """Share an explicitly limited batch from another seller's closet."""
+        if not self.config.share_community_listings:
+            return ShareResult(
+                success=False,
+                failed=1,
+                message="Community sharing disabled",
+            )
+
+        selected = list(listings)
+        if self.config.community_share_limit is not None:
+            selected = selected[:self.config.community_share_limit]
+
+        return self._run_batch(
+            selected,
+            operation=self.share_listing,
+            destination="community listings to followers",
+        )
+
+    def follow_back_batch(
+        self,
+        candidates: list[FollowCandidate],
+    ) -> ShareResult:
+        """Follow a finite list of confirmed followers not already followed."""
+        if not self.config.follow_backs_enabled:
+            return ShareResult(
+                success=False,
+                failed=1,
+                message="Follow-backs disabled",
+            )
+
+        selected = list(candidates)
+        if self.config.follow_back_limit is not None:
+            selected = selected[:self.config.follow_back_limit]
+
+        return self._run_batch(
+            selected,
+            operation=self.follow_back,
+            destination="follow-backs",
+        )
+
+    def follow_back(self, candidate: FollowCandidate) -> ShareResult:
+        """Follow one candidate and require the button to change to Following."""
+        start_time = time.time()
+        try:
+            link = self.page.locator(
+                f'a.follow__action__container[href="/closet/{candidate.username}"]'
+            ).first
+            if link.count() == 0 or not link.is_visible():
+                return ShareResult(
+                    success=False,
+                    failed=1,
+                    message=f"Follower row not found for @{candidate.username}",
+                )
+
+            row = link.locator(
+                "xpath=ancestor::*[.//button[contains(@class, 'follow__btn')]][1]"
+            )
+            button = row.locator("button.follow__btn").first
+            if button.count() == 0 or not button.is_visible():
+                return ShareResult(
+                    success=False,
+                    failed=1,
+                    message=f"Follow control not found for @{candidate.username}",
+                )
+
+            current_text = (button.inner_text() or "").strip()
+            if current_text == "Following":
+                return ShareResult(
+                    success=True,
+                    skipped=1,
+                    message=f"Already following @{candidate.username}",
+                )
+            if current_text != "Follow":
+                return ShareResult(
+                    success=False,
+                    failed=1,
+                    message=f"Unexpected follow control for @{candidate.username}",
+                )
+
+            button.click()
+            self.page.wait_for_timeout(1000)
+            updated_text = (button.inner_text() or "").strip()
+            if updated_text != "Following":
+                return ShareResult(
+                    success=False,
+                    failed=1,
+                    message=f"Follow-back could not be verified for @{candidate.username}",
+                )
+            return ShareResult(
+                success=True,
+                shared=1,
+                elapsed_seconds=time.time() - start_time,
+                message=f"Followed back @{candidate.username}",
+            )
+        except Exception as error:
+            return ShareResult(
+                success=False,
+                failed=1,
+                elapsed_seconds=time.time() - start_time,
+                message=f"Follow-back failed for @{candidate.username}: {error}",
+            )
+
     def share_batch_to_party(
         self,
         listings: list[ShareableListing],
@@ -135,8 +256,8 @@ class PoshmarkShareEngine:
 
     def _run_batch(
         self,
-        listings: list[ShareableListing],
-        operation: Callable[[ShareableListing], ShareResult],
+        listings: list[ShareableListing] | list[FollowCandidate],
+        operation: Callable[[ShareableListing | FollowCandidate], ShareResult],
         destination: str,
     ) -> ShareResult:
         """Coordinate a batch with progress, pause, stop, and failure limits."""
@@ -194,7 +315,11 @@ class PoshmarkShareEngine:
         completed = shared + skipped + failed
         stopped_early = completed < total
         success = failed == 0 and not stopped_early
-        message = "Sharing stopped" if stopped_early else "Sharing complete"
+        message = (
+            f"{destination.capitalize()} stopped"
+            if stopped_early
+            else f"{destination.capitalize()} complete"
+        )
         status = ShareStatus.COMPLETE if success else ShareStatus.FAILED
 
         self._emit_progress(ShareProgress(
@@ -224,7 +349,7 @@ class PoshmarkShareEngine:
         status: ShareStatus,
         current: int,
         total: int,
-        listing: ShareableListing,
+        listing: ShareableListing | FollowCandidate,
         shared: int,
         skipped: int,
         failed: int,
