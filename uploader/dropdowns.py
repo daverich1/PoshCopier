@@ -100,6 +100,8 @@ def click_locator(
 def find_visible_exact_text(
     page: Page,
     option_text: str,
+    *,
+    report_available: bool = False,
 ) -> Locator | None:
 
     target = normalize_option_text(
@@ -136,7 +138,8 @@ def find_visible_exact_text(
                 if not raw_text:
                     continue
 
-                available.append(raw_text)
+                if report_available:
+                    available.append(raw_text)
 
                 if (
                     normalize_option_text(raw_text)
@@ -147,9 +150,10 @@ def find_visible_exact_text(
             except Exception:
                 continue
 
-    print("\nAvailable options:")
-    for option in sorted(set(available)):
-        print(" -", option)
+    if report_available:
+        print("\nAvailable options:")
+        for option in sorted(set(available)):
+            print(" -", option)
 
     return None
 
@@ -229,6 +233,13 @@ def open_control(
     )
 
     if option is None:
+        option = find_visible_exact_text(
+            page,
+            expected_option,
+            report_available=True,
+        )
+
+    if option is None:
         raise RuntimeError(
             f"The control did not open an option named: {expected_option}"
         )
@@ -244,6 +255,13 @@ def select_visible_option(
         option_text,
         timeout_ms=5000,
     )
+
+    if option is None:
+        option = find_visible_exact_text(
+            page,
+            option_text,
+            report_available=True,
+        )
 
     if option is None:
         raise RuntimeError(

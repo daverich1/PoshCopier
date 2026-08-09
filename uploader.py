@@ -1,3 +1,5 @@
+import sys
+
 from playwright.sync_api import sync_playwright
 
 from data.database.database import (
@@ -12,8 +14,11 @@ from uploader.colors import fill_colors
 from uploader.condition import fill_condition
 from uploader.duplicate_detector import (
     add_destination_url,
-    collect_destination_listing_urls,
     find_existing_duplicate,
+)
+from uploader.destination_cache import (
+    get_or_refresh_destination_urls,
+    save_cache,
 )
 from uploader.form_fields import (
     close_price_modal,
@@ -334,7 +339,7 @@ def main() -> None:
 
         try:
             destination_urls = (
-                collect_destination_listing_urls(
+                get_or_refresh_destination_urls(
                     page,
                     DESTINATION_CLOSET_URL,
                 )
@@ -404,6 +409,16 @@ def main() -> None:
 
                     raise
 
+            try:
+                save_cache(
+                    DESTINATION_CLOSET_URL,
+                    destination_urls,
+                    full_scan=False,
+                )
+                print("Destination cache saved for the next batch.")
+            except Exception as error:
+                print("Warning: Could not save destination cache:", error)
+
             print(
                 "\n" + "=" * 60
             )
@@ -426,10 +441,14 @@ def main() -> None:
 
             print("=" * 60)
 
-            input(
-                "\nPress ENTER to close "
-                "the browser..."
-            )
+            if sys.stdin.isatty():
+                try:
+                    input(
+                        "\nPress ENTER to close "
+                        "the browser..."
+                    )
+                except EOFError:
+                    pass
 
         except Exception as error:
             print(
@@ -458,11 +477,16 @@ def main() -> None:
                 existing_duplicates,
             )
 
-            input(
-                "\nThe browser will remain open. "
-                "Inspect the problem, then press "
-                "ENTER to close..."
-            )
+            if sys.stdin.isatty():
+                try:
+                    input(
+                        "\nThe browser will remain open. "
+                        "Inspect the problem, then press "
+                        "ENTER to close..."
+                    )
+                except EOFError:
+                    pass
+            raise
 
         finally:
             context.close()

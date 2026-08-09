@@ -1,5 +1,7 @@
 from playwright.sync_api import Locator, Page
 
+from uploader.dropdowns import click_locator
+
 
 CONDITION_ALIASES = {
     "new with tags": "New With Tags (NWT)",
@@ -169,45 +171,41 @@ def fill_condition(
             "Could not find the condition control."
         )
 
-    condition_control.scroll_into_view_if_needed()
-    condition_control.click()
+    for attempt in range(1, 4):
+        condition_control = find_condition_control(page)
+        if condition_control is None:
+            break
 
-    page.wait_for_timeout(1000)
+        click_locator(condition_control)
+        page.wait_for_timeout(800)
 
-    option = find_visible_condition_option(
-        page,
-        destination_condition,
-    )
-
-    if option is None:
-        raise RuntimeError(
-            "Could not find condition option: "
-            f"{destination_condition}"
+        option = find_visible_condition_option(
+            page,
+            destination_condition,
         )
 
-    try:
-        option.click(
-            timeout=5000,
+        if option is not None:
+            click_locator(option)
+            page.wait_for_timeout(800)
+
+            if verify_condition_selected(
+                page,
+                destination_condition,
+            ):
+                print(
+                    f"Condition selected: "
+                    f"{destination_condition}"
+                )
+                return
+
+        print(
+            f"Condition selection attempt {attempt}/3 "
+            "did not verify; reopening the control."
         )
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
 
-    except Exception:
-        option.click(
-            timeout=5000,
-            force=True,
-        )
-
-    page.wait_for_timeout(1000)
-
-    if not verify_condition_selected(
-        page,
-        destination_condition,
-    ):
-        raise RuntimeError(
-            f"Condition {destination_condition} "
-            "was clicked, but could not be verified."
-        )
-
-    print(
-        f"Condition selected: "
+    raise RuntimeError(
+        "Could not select and verify condition option: "
         f"{destination_condition}"
     )
