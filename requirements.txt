@@ -1,0 +1,9 @@
+# Runtime dependencies used by the active dashboard and browser pipeline.
+Pillow==12.3.0
+playwright==1.62.0
+
+# Imported by the legacy gui/ package that remains in this repository.
+customtkinter==6.0.0
+
+# Release build tooling used by build.py.
+PyInstaller==6.21.0

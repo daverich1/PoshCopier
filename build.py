@@ -27,16 +27,12 @@ PLAYWRIGHT_BROWSERS_DIR = (
     / "pw-browsers"
 )
 DOWNLOADS_DIR = PROJECT_DIR / "downloads"
-
-SOURCE_STATE_FILE = (
-    PROJECT_DIR
-    / "source_state.json"
-)
-DESTINATION_STATE_FILE = (
-    PROJECT_DIR
-    / "destination_state.json"
-)
 DATABASE_FILE = PROJECT_DIR / "poshcopier.db"
+
+SESSION_STATE_FILENAMES = (
+    "source_state.json",
+    "destination_state.json",
+)
 
 DASHBOARD_SPEC = (
     PROJECT_DIR
@@ -76,6 +72,26 @@ def require_directory(
     if not path.is_dir():
         raise BuildError(
             f"Required folder was not found:\n{path}"
+        )
+
+
+def assert_session_files_excluded(
+    release_dir: Path,
+) -> None:
+    included = [
+        path
+        for filename in SESSION_STATE_FILENAMES
+        for path in release_dir.rglob(filename)
+    ]
+
+    if included:
+        paths = "\n".join(
+            str(path)
+            for path in included
+        )
+        raise BuildError(
+            "Sensitive browser session state must not be packaged:\n"
+            f"{paths}"
         )
 
 
@@ -161,12 +177,6 @@ def validate_source_project() -> None:
         DOWNLOADS_DIR,
     ):
         require_directory(path)
-
-    for path in (
-        SOURCE_STATE_FILE,
-        DESTINATION_STATE_FILE,
-    ):
-        require_file(path)
 
     require_file(
         DOWNLOADS_DIR
@@ -348,21 +358,6 @@ def assemble_release_folder() -> None:
         "Downloaded listing data copied."
     )
 
-    shutil.copy2(
-        SOURCE_STATE_FILE,
-        DASHBOARD_BUILD_DIR
-        / SOURCE_STATE_FILE.name,
-    )
-    shutil.copy2(
-        DESTINATION_STATE_FILE,
-        DASHBOARD_BUILD_DIR
-        / DESTINATION_STATE_FILE.name,
-    )
-
-    print(
-        "Login state files copied."
-    )
-
     if DATABASE_FILE.exists():
         shutil.copy2(
             DATABASE_FILE,
@@ -402,10 +397,6 @@ def verify_release() -> None:
         EMBEDDED_PIPELINE_DIR
         / "PoshCopierPipeline.exe",
         DASHBOARD_BUILD_DIR
-        / "source_state.json",
-        DASHBOARD_BUILD_DIR
-        / "destination_state.json",
-        DASHBOARD_BUILD_DIR
         / "downloads"
         / "discovered_listings.json",
     )
@@ -440,6 +431,10 @@ def verify_release() -> None:
                 DASHBOARD_BUILD_DIR
             ),
         )
+
+    assert_session_files_excluded(
+        DASHBOARD_BUILD_DIR
+    )
 
     accidental_paths = (
         DASHBOARD_BUILD_DIR

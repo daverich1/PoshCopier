@@ -1,81 +1,55 @@
-# ==========================================
-# PoshCopier .gitignore
-# ==========================================
-
-# ------------------------------------------
-# Python
-# ------------------------------------------
+# Python bytecode and test caches
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.pyd
+.pytest_cache/
+.coverage
+htmlcov/
 
-# ------------------------------------------
-# Virtual Environments
-# ------------------------------------------
+# Virtual environments
 .venv/
 venv/
 
-# ------------------------------------------
-# VS Code
-# ------------------------------------------
+# Editor and operating-system files
 .vscode/
-
-# ------------------------------------------
-# Logs
-# ------------------------------------------
-logs/
-
-# ------------------------------------------
-# Runtime Database
-# ------------------------------------------
-poshcopier.db
-
-# ------------------------------------------
-# Python Test Cache
-# ------------------------------------------
-.pytest_cache/
-
-# ------------------------------------------
-# Temporary Files
-# ------------------------------------------
-*.tmp
-*.temp
-
-# ------------------------------------------
-# Windows
-# ------------------------------------------
+.idea/
 Thumbs.db
 Desktop.ini
 
-# ------------------------------------------
-# Generated Downloads
-# ------------------------------------------
-downloads/
-
-# ------------------------------------------
-# Build Artifacts
-# ------------------------------------------
-build/
-dist/
-*.spec
-# Login/session files
+# Local credentials and browser session state
+.env
+.env.*
+!.env.example
 source_state.json
 destination_state.json
+*.pem
+*.key
 
-# Runtime data
+# Runtime database, listings, logs, and reports
 poshcopier.db
 downloads/
+downloads.zip
 logs/
+reports/
+runtime/
+*.log
 
-# Playwright browsers
+# Private per-user eBay settings and review decisions
+ebay_settings.json
+ebay_category_rules.json
+ebay_condition_rules.json
+ebay_drafts/
+
+# Playwright browser binaries
 pw-browsers/
 
-# PyInstaller output
+# Build and packaging artifacts
 build/
 dist/
 *.spec
-
-# Temporary packaging files
 packaging_files.txt
 dashboard/dashboard.before_packaging.py
+
+# Temporary files
+*.tmp
+*.temp
