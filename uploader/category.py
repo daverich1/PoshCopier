@@ -22,6 +22,7 @@ KNOWN_CATEGORIES = (
     "Jackets & Coats",
     "Accessories",
     "Sweaters",
+    "Dining",
     "Dresses",
     "Makeup",
     "Shorts",
@@ -51,6 +52,7 @@ KNOWN_SUBCATEGORIES = (
     "Sandals",
     "Heels",
     "Flats & Loafers",
+    "Drinkware",
 )
 
 
@@ -222,12 +224,6 @@ def fill_category(
         )
 
     if subcategory:
-        page.wait_for_timeout(1200)
-
-        subcategory_control = find_subcategory_control(
-            page
-        )
-
         ui_subcategory = SUBCATEGORY_UI_ALIASES.get(
             subcategory,
             subcategory,
@@ -239,11 +235,49 @@ def fill_category(
                 f"-> {ui_subcategory}"
             )
 
-        open_and_select(
-            page,
-            subcategory_control,
-            ui_subcategory,
-        )
+        subcategory_options = [ui_subcategory]
+
+        if ui_subcategory != subcategory:
+            subcategory_options.append(subcategory)
+
+        selected = False
+        last_error = None
+
+        for option in subcategory_options:
+            for attempt in range(1, 3):
+                page.wait_for_timeout(2000)
+
+                subcategory_control = find_subcategory_control(
+                    page
+                )
+
+                try:
+                    open_and_select(
+                        page,
+                        subcategory_control,
+                        option,
+                    )
+                    selected = True
+                    break
+                except RuntimeError as error:
+                    last_error = error
+
+                    if attempt < 2:
+                        print(
+                            "Subcategory option was not ready; retrying..."
+                        )
+
+            if selected:
+                break
+
+            if option != subcategory:
+                print(
+                    f"Mapped subcategory unavailable; "
+                    f"trying {subcategory}."
+                )
+
+        if not selected and last_error is not None:
+            raise last_error
 
         # We intentionally do NOT verify the text here.
         # The screenshots show the dropdown is selecting
