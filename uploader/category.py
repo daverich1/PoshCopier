@@ -36,7 +36,6 @@ KNOWN_CATEGORIES = (
 )
 
 SUBCATEGORY_UI_ALIASES = {
-    "Sandals": "Sandals & Flip-Flops",
 }
 
 

@@ -14,6 +14,13 @@ PRESET_TABS = (
     "Maternity",
 )
 
+INVENTORY_QUANTITY_INPUT_SELECTOR = (
+    'input[type="number"], '
+    'input[inputmode="numeric"], '
+    'input[type="text"], '
+    'input:not([type])'
+)
+
 
 def normalize_text(value: str | None) -> str:
     if not value:
@@ -27,6 +34,23 @@ def compact_text(value: str | None) -> str:
         "",
         normalize_text(value),
     )
+
+
+def row_text_matches_size(
+    row_text: str | None,
+    size: str,
+) -> bool:
+    """Match a size as a complete token, not a substring such as S in Photos."""
+    normalized_row = normalize_text(row_text)
+    normalized_size = normalize_text(size)
+
+    if not normalized_row or not normalized_size:
+        return False
+
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(normalized_size)}(?![a-z0-9])",
+        normalized_row,
+    ) is not None
 
 
 def first_visible(locator: Locator) -> Locator | None:
@@ -506,22 +530,41 @@ def build_quantity_map(
     return quantities
 
 
-def find_inventory_rows(
+def find_available_quantity_inputs(
     page: Page,
 ) -> list[Locator]:
-    inputs = page.locator(
-        'input[type="number"], '
-        'input[inputmode="numeric"], '
-        'input'
+    available_header = first_visible(
+        page.get_by_text("Available", exact=True)
     )
 
-    rows: list[
+    if available_header is None:
+        raise RuntimeError(
+            "Could not find the Available quantity column."
+        )
+
+    header_box = available_header.bounding_box()
+    if header_box is None:
+        raise RuntimeError(
+            "Could not locate the Available quantity column."
+        )
+
+    header_center_x = (
+        header_box["x"] + header_box["width"] / 2
+    )
+    maximum_x_distance = max(
+        18,
+        header_box["width"] * 0.4,
+    )
+    minimum_y = header_box["y"] + header_box["height"] - 5
+    maximum_y = minimum_y + 500
+
+    inputs = page.locator(
+        INVENTORY_QUANTITY_INPUT_SELECTOR
+    )
+
+    matches: list[
         tuple[float, Locator]
     ] = []
-
-    seen: set[
-        tuple[int, int, int, int]
-    ] = set()
 
     for index in range(inputs.count()):
         input_locator = inputs.nth(index)
@@ -535,65 +578,40 @@ def find_inventory_rows(
             if box is None:
                 continue
 
-            parent = input_locator.locator(
-                "xpath=.."
-            )
+            center_x = box["x"] + box["width"] / 2
+            center_y = box["y"] + box["height"] / 2
 
-            # Walk upward until the row contains visible text
-            # but remains reasonably small.
-            row = parent
-
-            for _ in range(4):
-                text = normalize_text(
-                    row.inner_text()
-                )
-
-                row_box = row.bounding_box()
-
-                if (
-                    row_box is not None
-                    and row_box["height"] <= 90
-                    and text
-                ):
-                    break
-
-                row = row.locator(
-                    "xpath=.."
-                )
-
-            row_box = row.bounding_box()
-
-            if row_box is None:
+            if (
+                abs(center_x - header_center_x) > maximum_x_distance
+                or center_y < minimum_y
+                or center_y > maximum_y
+            ):
                 continue
 
-            key = (
-                round(row_box["x"]),
-                round(row_box["y"]),
-                round(row_box["width"]),
-                round(row_box["height"]),
-            )
-
-            if key in seen:
+            value = input_locator.input_value().strip()
+            if not re.fullmatch(
+                r"\d+",
+                value,
+            ):
                 continue
 
-            seen.add(key)
-            rows.append(
+            matches.append(
                 (
-                    row_box["y"],
-                    row,
+                    center_y,
+                    input_locator,
                 )
             )
 
         except Exception:
             continue
 
-    rows.sort(
+    matches.sort(
         key=lambda item: item[0]
     )
 
     return [
-        row
-        for _, row in rows
+        input_locator
+        for _, input_locator in matches
     ]
 
 
@@ -602,61 +620,18 @@ def set_available_quantities(
     sizes: list[str],
     quantities: dict[str, int],
 ) -> None:
-    rows = find_inventory_rows(
+    quantity_inputs = find_available_quantity_inputs(
         page
     )
 
-    if len(rows) < len(sizes):
+    if len(quantity_inputs) < len(sizes):
         raise RuntimeError(
             "Could not find enough Available quantity rows. "
-            f"Expected {len(sizes)}, found {len(rows)}."
+            f"Expected {len(sizes)}, found {len(quantity_inputs)}."
         )
 
-    used_rows: set[int] = set()
-
-    for size in sizes:
-        target_row: Locator | None = None
-        target_index = -1
-
-        for index, row in enumerate(rows):
-            if index in used_rows:
-                continue
-
-            try:
-                row_text = compact_text(
-                    row.inner_text()
-                )
-            except Exception:
-                continue
-
-            if compact_text(size) in row_text:
-                target_row = row
-                target_index = index
-                break
-
-        if target_row is None:
-            for index, row in enumerate(rows):
-                if index not in used_rows:
-                    target_row = row
-                    target_index = index
-                    break
-
-        if target_row is None:
-            raise RuntimeError(
-                f"Could not find inventory row for size {size}."
-            )
-
-        quantity_input = first_visible(
-            target_row.locator(
-                "input"
-            )
-        )
-
-        if quantity_input is None:
-            raise RuntimeError(
-                f"Could not find Available input for size {size}."
-            )
-
+    for index, size in enumerate(sizes):
+        quantity_input = quantity_inputs[index]
         quantity = quantities.get(
             size,
             1,
@@ -664,10 +639,6 @@ def set_available_quantities(
 
         quantity_input.fill(
             str(quantity)
-        )
-
-        used_rows.add(
-            target_index
         )
 
         print(

@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 from playwright.sync_api import Page, sync_playwright
 
 from login import DESTINATION_STATE_FILE, open_logged_in_browser
+from scraper.availability import verify_listing_availability
+from scraper.discover import _apply_available_items_filter
 from sharing.share_config import ShareConfig
 from sharing.share_engine import PoshmarkShareEngine, ShareableListing
 from sharing.share_progress import ShareProgress, ShareResult
@@ -41,38 +43,75 @@ def collect_shareable_listings(
     closet_url: str,
     limit: int,
 ) -> list[ShareableListing]:
-    """Collect unique visible listing cards from a destination closet."""
+    """Collect unique listing cards across the closet's lazy-loaded pages."""
+    if limit < 1:
+        return []
     page.goto(closet_url, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(3000)
+    if not _apply_available_items_filter(page):
+        raise RuntimeError(
+            "Could not verify Poshmark's Available Items and Active Items filters; "
+            "sharing discovery stopped."
+        )
+
+    candidates: list[ShareableListing] = []
+    seen_ids: set[str] = set()
+    unchanged_passes = 0
+
+    for _ in range(60):
+        count_before = len(candidates)
+        for link in page.locator("a.tile__covershot").all():
+            href = link.get_attribute("href") or ""
+            if href.startswith("/"):
+                href = f"https://poshmark.com{href}"
+
+            listing_id = listing_id_from_url(href)
+            if not listing_id or listing_id in seen_ids:
+                continue
+
+            title = link.get_attribute("title") or ""
+            if not title:
+                try:
+                    title = link.locator("img").first.get_attribute("alt") or ""
+                except Exception:
+                    title = ""
+
+            seen_ids.add(listing_id)
+            candidates.append(ShareableListing(
+                listing_id=listing_id,
+                url=href,
+                title=title.strip() or f"Listing {listing_id}",
+                available=False,
+                active=None,
+            ))
+
+        if len(candidates) == count_before:
+            unchanged_passes += 1
+        else:
+            unchanged_passes = 0
+        if unchanged_passes >= 3:
+            break
+
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1000)
 
     listings: list[ShareableListing] = []
-    seen_ids: set[str] = set()
-    links = page.locator("a.tile__covershot").all()
-
-    for link in links:
-        href = link.get_attribute("href") or ""
-        if href.startswith("/"):
-            href = f"https://poshmark.com{href}"
-
-        listing_id = listing_id_from_url(href)
-        if not listing_id or listing_id in seen_ids:
+    for candidate in candidates:
+        try:
+            page.goto(
+                candidate.url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            page.wait_for_timeout(1000)
+            availability = verify_listing_availability(page)
+        except Exception:
             continue
-
-        title = link.get_attribute("title") or ""
-        if not title:
-            try:
-                title = link.locator("img").first.get_attribute("alt") or ""
-            except Exception:
-                title = ""
-
-        seen_ids.add(listing_id)
-        listings.append(ShareableListing(
-            listing_id=listing_id,
-            url=href,
-            title=title.strip() or f"Listing {listing_id}",
-            available=True,
-        ))
-
+        if not availability.available:
+            continue
+        candidate.available = True
+        candidate.active = True
+        listings.append(candidate)
         if len(listings) >= limit:
             break
 

@@ -6,13 +6,17 @@ import unittest
 from dataclasses import dataclass
 from unittest.mock import Mock, patch
 
-from sharing.share_config import ShareConfig
+from sharing.share_config import MAX_FOLLOWER_SHARES_PER_RUN, ShareConfig
 from sharing.share_engine import FollowCandidate, PoshmarkShareEngine, ShareableListing
 from sharing.follow_runner import USERNAME_PATTERN
 from sharing.share_progress import ShareResult, ShareStatus
-from sharing.share_runner import closet_name_from_url, listing_id_from_url
-from sharing.party_runner import run_party_candidate
-from party.eligibility import is_listing_eligible_for_party
+from sharing.share_runner import (
+    closet_name_from_url,
+    collect_shareable_listings,
+    listing_id_from_url,
+)
+from sharing.party_runner import run_live_party_batch, run_party_candidate
+from party.eligibility import is_listing_eligible_for_party, party_brand_matches
 from party.party_models import (
     GuidelineParseConfidence,
     PartyEligibilityStatus,
@@ -20,7 +24,10 @@ from party.party_models import (
     PartyType,
     PoshParty,
 )
-from scraper.availability import AvailabilityStatus
+from scraper.availability import (
+    AvailabilityResult,
+    AvailabilityStatus,
+)
 
 
 @dataclass
@@ -41,6 +48,18 @@ class SharingBatchTests(unittest.TestCase):
         )
         engine = PoshmarkShareEngine(Mock(), config, progress.append)
         return engine, progress
+
+    def test_follower_share_limit_accepts_1000_and_rejects_more(self):
+        config = ShareConfig(
+            closet_url="https://poshmark.com/closet/test",
+            max_shares=MAX_FOLLOWER_SHARES_PER_RUN,
+        )
+        self.assertEqual(config.max_shares, 1000)
+        with self.assertRaisesRegex(ValueError, "cannot exceed 1000"):
+            ShareConfig(
+                closet_url="https://poshmark.com/closet/test",
+                max_shares=1001,
+            )
 
     def test_follower_batch_respects_limit_and_reports_progress(self):
         engine, progress = self.make_engine(max_shares=2)
@@ -76,6 +95,121 @@ class SharingBatchTests(unittest.TestCase):
         )
         self.assertEqual(closet_name_from_url("https://example.com/closet/test"), "")
         self.assertEqual(closet_name_from_url("https://poshmark.com/listing/test"), "")
+
+    def test_listing_collection_scrolls_beyond_initial_page(self):
+        ids = [f"{index:024x}" for index in range(1, 6)]
+
+        class FakeLink:
+            def __init__(self, listing_id):
+                self.listing_id = listing_id
+
+            def get_attribute(self, name):
+                if name == "href":
+                    return f"/listing/Test-{self.listing_id}"
+                if name == "title":
+                    return f"Item {self.listing_id}"
+                return None
+
+        class FakeLocator:
+            def __init__(self, page):
+                self.page = page
+
+            def all(self):
+                visible = ids[: min(len(ids), (self.page.scrolls + 1) * 2)]
+                return [FakeLink(listing_id) for listing_id in visible]
+
+        class FakePage:
+            def __init__(self):
+                self.scrolls = 0
+
+            def goto(self, *_args, **_kwargs):
+                return None
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+            def locator(self, selector):
+                self.assert_selector = selector
+                return FakeLocator(self)
+
+            def evaluate(self, _script):
+                self.scrolls += 1
+
+        page = FakePage()
+        with patch(
+            "sharing.share_runner._apply_available_items_filter",
+            return_value=True,
+        ), patch(
+            "sharing.share_runner.verify_listing_availability",
+            return_value=AvailabilityResult(
+                AvailabilityStatus.AVAILABLE,
+                True,
+                "active purchase control",
+            ),
+        ):
+            listings = collect_shareable_listings(
+                page,
+                "https://poshmark.com/closet/test",
+                5,
+            )
+
+        self.assertEqual([listing.listing_id for listing in listings], ids)
+        self.assertTrue(all(listing.available and listing.active for listing in listings))
+        self.assertGreaterEqual(page.scrolls, 2)
+
+    def test_listing_collection_excludes_unavailable_and_ambiguous_items(self):
+        ids = [f"{index:024x}" for index in range(1, 4)]
+
+        link = lambda listing_id: Mock(
+            get_attribute=Mock(
+                side_effect=lambda name: (
+                    f"/listing/Test-{listing_id}" if name == "href" else "Test"
+                )
+            )
+        )
+        page = Mock()
+        page.locator.return_value.all.return_value = [link(value) for value in ids]
+        results = iter(
+            (
+                AvailabilityResult(AvailabilityStatus.SOLD, False, "sold"),
+                AvailabilityResult(AvailabilityStatus.UNKNOWN, False, "ambiguous"),
+                AvailabilityResult(AvailabilityStatus.AVAILABLE, True, "in stock"),
+            )
+        )
+
+        with patch(
+            "sharing.share_runner._apply_available_items_filter",
+            return_value=True,
+        ), patch(
+            "sharing.share_runner.verify_listing_availability",
+            side_effect=lambda _page: next(results),
+        ):
+            listings = collect_shareable_listings(
+                page,
+                "https://poshmark.com/closet/test",
+                3,
+            )
+
+        self.assertEqual([listing.listing_id for listing in listings], [ids[2]])
+        self.assertTrue(listings[0].available)
+        self.assertTrue(listings[0].active)
+
+    def test_listing_collection_stops_when_poshmark_filters_are_not_verified(self):
+        page = Mock()
+        with patch(
+            "sharing.share_runner._apply_available_items_filter",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Available Items and Active Items filters",
+            ):
+                collect_shareable_listings(
+                    page,
+                    "https://poshmark.com/closet/test",
+                    10,
+                )
+        page.locator.assert_not_called()
 
     def test_community_batch_is_disabled_by_default(self):
         engine, progress = self.make_engine()
@@ -154,6 +288,11 @@ class SharingBatchTests(unittest.TestCase):
         self.assertEqual(result.failed, 1)
         self.assertIn("valid Poshmark ID", result.message)
 
+    def test_automatic_party_batch_enforces_finite_safety_limit(self):
+        result = run_live_party_batch(51, perform_share=False)
+        self.assertFalse(result.success)
+        self.assertIn("1-50", result.message)
+
     def test_party_eligibility_matches_combined_department_category(self):
         party = PoshParty(
             party_id="tops",
@@ -185,6 +324,44 @@ class SharingBatchTests(unittest.TestCase):
         result = is_listing_eligible_for_party(listing, party)
 
         self.assertEqual(result.status, PartyEligibilityStatus.ELIGIBLE)
+
+    def test_party_eligibility_accepts_confirmed_hoka_brand_alias(self):
+        party = PoshParty(
+            party_id="activewear",
+            name="Activewear Party",
+            url="https://poshmark.com/party/activewear",
+            start_time_text="Happening now",
+            start_at=None,
+            is_live=True,
+            party_type=PartyType.BRAND_LIMITED,
+            guidelines=PartyGuidelines(
+                theme="Activewear Party",
+                brands_allowed=["Hoka"],
+                categories_allowed=["All"],
+                departments_allowed=[],
+                sizes_allowed=[],
+                other_rules=[],
+                parse_confidence=GuidelineParseConfidence.HIGH,
+            ),
+        )
+        result = is_listing_eligible_for_party(
+            {
+                "availability": AvailabilityStatus.AVAILABLE,
+                "brand": "Hoka One One",
+                "department": "Women",
+                "category": "Shoes",
+                "subcategory": "Sneakers",
+                "size": "10.5",
+            },
+            party,
+        )
+        self.assertEqual(result.status, PartyEligibilityStatus.ELIGIBLE)
+
+    def test_party_brand_phrase_matching_uses_word_boundaries(self):
+        self.assertTrue(party_brand_matches("Hoka One One", "Hoka"))
+        self.assertTrue(party_brand_matches("Champion Sports", "Champion"))
+        self.assertFalse(party_brand_matches("Adrienne Vittadini", "REI"))
+        self.assertFalse(party_brand_matches("Steve Madden", "Teva"))
 
     def test_batch_skips_unavailable_listing_without_sharing_it(self):
         engine, progress = self.make_engine()

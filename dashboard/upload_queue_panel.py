@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from inventory.upload_queue import QueueStatus, UploadQueueManager
+from inventory.batch_report import save_batch_report
 from pipeline.upload_queue_processor import ProcessResult, UploadQueueProcessor
 
 
@@ -708,6 +709,12 @@ class UploadQueuePanel(ttk.LabelFrame):
         
         # Get cumulative queue summary for remaining count
         summary = self.queue_manager.progress_summary()
+
+        try:
+            _, report_path = save_batch_report(results, summary)
+            self._append_output(f"Completion report: {report_path}")
+        except OSError as exc:
+            self._append_output(f"Warning: could not save completion report: {exc}")
         
         # Show completion dialog with current-run statistics
         completion_msg = (

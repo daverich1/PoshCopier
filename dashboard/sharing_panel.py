@@ -7,10 +7,14 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
-from sharing.share_config import ShareConfig
+from sharing.share_config import MAX_FOLLOWER_SHARES_PER_RUN, ShareConfig
 from sharing.share_engine import PoshmarkShareEngine
 from sharing.share_progress import ShareProgress, ShareResult, ShareStatus
-from sharing.party_runner import run_party_candidate
+from sharing.party_runner import (
+    MAX_AUTOMATIC_PARTY_SHARES,
+    run_live_party_batch,
+    run_party_candidate,
+)
 from sharing.follow_runner import run_follow_backs
 from sharing.share_runner import run_community_sharing, run_follower_sharing
 
@@ -34,12 +38,14 @@ class SharingPanel(ttk.Frame):
         self.eta_var = tk.StringVar(value="—")
         self.party_name_var = tk.StringVar(value="")
         self.party_listing_url_var = tk.StringVar(value="")
+        self.auto_party_count_var = tk.StringVar(value="10")
         self.community_closet_url_var = tk.StringVar(value="")
         self.community_count_var = tk.StringVar(value="1")
         self.follow_back_count_var = tk.StringVar(value="1")
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._engine: PoshmarkShareEngine | None = None
+        self._auto_party_preview: tuple[str, int, int] | None = None
 
         self._build_interface()
         self.after(100, self._poll_events)
@@ -147,6 +153,36 @@ class SharingPanel(ttk.Frame):
             party,
             text="Validation is read-only. Live sharing requires confirmation and is limited to one listing.",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Separator(party).grid(
+            row=4, column=0, columnspan=3, sticky="ew", pady=(12, 8)
+        )
+        ttk.Label(party, text="Automatic eligible shares:").grid(
+            row=5, column=0, sticky="w", padx=(0, 8), pady=4
+        )
+        ttk.Entry(
+            party, textvariable=self.auto_party_count_var, width=10
+        ).grid(row=5, column=1, sticky="w", pady=4)
+        auto_actions = ttk.Frame(party)
+        auto_actions.grid(row=5, column=2, sticky="e", pady=4)
+        self.preview_auto_party_button = ttk.Button(
+            auto_actions,
+            text="Preview Eligible",
+            command=self.preview_auto_party,
+        )
+        self.preview_auto_party_button.pack(side="left")
+        self.share_auto_party_button = ttk.Button(
+            auto_actions,
+            text="Share Previewed",
+            command=self.share_auto_party,
+        )
+        self.share_auto_party_button.pack(side="left", padx=(8, 0))
+        ttk.Label(
+            party,
+            text=(
+                "Automatically discovers the live party, applies Available + Active "
+                "filters, verifies eligibility, and requires a fresh preview."
+            ),
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         community = ttk.LabelFrame(self, text="Community Sharing", padding=12)
         community.pack(fill="x", pady=(12, 0))
@@ -218,10 +254,10 @@ class SharingPanel(ttk.Frame):
             messagebox.showerror("Invalid Settings", "Count must be whole and delay numeric.")
             return
 
-        if count < 1 or count > 500 or delay < 0:
+        if count < 1 or count > MAX_FOLLOWER_SHARES_PER_RUN or delay < 0:
             messagebox.showerror(
                 "Invalid Settings",
-                "Count must be 1–500 and delay cannot be negative.",
+                f"Count must be 1-{MAX_FOLLOWER_SHARES_PER_RUN} and delay cannot be negative.",
             )
             return
 
@@ -385,6 +421,87 @@ class SharingPanel(ttk.Frame):
     def validate_party_candidate(self) -> None:
         self._start_party_candidate(perform_share=False)
 
+    def preview_auto_party(self) -> None:
+        self._start_auto_party(perform_share=False)
+
+    def share_auto_party(self) -> None:
+        self._start_auto_party(perform_share=True)
+
+    def _start_auto_party(self, *, perform_share: bool) -> None:
+        if self.is_running:
+            return
+        try:
+            count = int(self.auto_party_count_var.get().strip())
+            delay = float(self.delay_var.get().strip())
+        except ValueError:
+            messagebox.showerror(
+                "Invalid Party Settings",
+                "Count must be whole and delay numeric.",
+            )
+            return
+        if count < 1 or count > MAX_AUTOMATIC_PARTY_SHARES or delay < 0:
+            messagebox.showerror(
+                "Invalid Party Settings",
+                f"Count must be 1-{MAX_AUTOMATIC_PARTY_SHARES} and delay cannot be negative.",
+            )
+            return
+        if perform_share:
+            preview = self._auto_party_preview
+            if preview is None or preview[2] != count:
+                messagebox.showwarning(
+                    "Fresh Preview Required",
+                    "Preview eligible live-party listings for this count first.",
+                )
+                return
+            party_name, eligible_count, _preview_count = preview
+            if not messagebox.askyesno(
+                "Confirm Automatic Party Sharing",
+                f"Share up to {eligible_count} reverified listing(s) to {party_name}?",
+            ):
+                return
+            run_count = min(count, eligible_count)
+            expected_party_name = party_name
+        else:
+            self._auto_party_preview = None
+            run_count = count
+            expected_party_name = None
+
+        self._reset_progress()
+        self._set_running(True)
+        self.status_var.set(
+            "Sharing eligible live-party listings"
+            if perform_share
+            else "Previewing live-party eligibility"
+        )
+        self._thread = threading.Thread(
+            target=self._run_auto_party_worker,
+            args=(run_count, delay, perform_share, expected_party_name),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run_auto_party_worker(
+        self,
+        count: int,
+        delay: float,
+        perform_share: bool,
+        expected_party_name: str | None,
+    ) -> None:
+        try:
+            result = run_live_party_batch(
+                count,
+                delay_seconds=delay,
+                perform_share=perform_share,
+                expected_party_name=expected_party_name,
+                progress_callback=lambda value: self._events.put(("progress", value)),
+                engine_callback=lambda value: self._events.put(("engine", value)),
+            )
+            self._events.put(
+                ("auto_party_result", (perform_share, count, result))
+            )
+        except Exception as error:
+            self._events.put(("error", str(error)))
+
     def share_party_candidate(self) -> None:
         self._start_party_candidate(perform_share=True)
 
@@ -444,6 +561,11 @@ class SharingPanel(ttk.Frame):
                 elif event == "party_result":
                     perform_share, result = value  # type: ignore[misc]
                     self._finish_party(bool(perform_share), result)
+                elif event == "auto_party_result":
+                    perform_share, count, result = value  # type: ignore[misc]
+                    self._finish_auto_party(
+                        bool(perform_share), int(count), result
+                    )
                 elif event == "community_result":
                     perform_share, result = value  # type: ignore[misc]
                     self._finish_community(bool(perform_share), result)
@@ -496,6 +618,31 @@ class SharingPanel(ttk.Frame):
             if performed_share:
                 self.shared_var.set(str(result.shared))
         else:
+            self.failed_var.set(str(result.failed))
+        self._set_running(False)
+        self._engine = None
+
+    def _finish_auto_party(
+        self,
+        performed_share: bool,
+        requested_count: int,
+        result: ShareResult,
+    ) -> None:
+        action = "Automatic party sharing" if performed_share else "Party preview"
+        self._append(f"{action}: {result.message}")
+        self.status_var.set("Complete" if result.success else "Failed")
+        if result.success and not performed_share:
+            self._auto_party_preview = (
+                result.party_name or "Live Posh Party",
+                result.skipped,
+                requested_count,
+            )
+            self.progress_var.set(100.0)
+            self.progress_text_var.set(f"{result.skipped} eligible candidate(s)")
+        elif performed_share:
+            self._auto_party_preview = None
+            self.shared_var.set(str(result.shared))
+            self.skipped_var.set(str(result.skipped))
             self.failed_var.set(str(result.failed))
         self._set_running(False)
         self._engine = None
@@ -553,6 +700,8 @@ class SharingPanel(ttk.Frame):
         party_state = "disabled" if running else "normal"
         self.validate_party_button.configure(state=party_state)
         self.share_party_button.configure(state=party_state)
+        self.preview_auto_party_button.configure(state=party_state)
+        self.share_auto_party_button.configure(state=party_state)
         self.validate_community_button.configure(state=party_state)
         self.share_community_button.configure(state=party_state)
         self.validate_follow_backs_button.configure(state=party_state)

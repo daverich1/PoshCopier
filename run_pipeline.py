@@ -68,6 +68,11 @@ from uploader.publisher import publish_listing
 from uploader.size import fill_size
 
 from uploader.multi_size import fill_multi_size_inventory
+from uploader.size_strategy import (
+    SIZE_MODE_COMBINED,
+    build_size_variants,
+    validate_size_mode,
+)
 
 from runtime_paths import (
     APP_DIR,
@@ -461,6 +466,9 @@ def fill_listing_form(
 def record_completion(
     listing: dict[str, Any],
     destination_url: str,
+    *,
+    completion_key: str | None = None,
+    record_local: bool = True,
 ) -> None:
     listing_id = str(listing["listing_id"])
     destination_id = extract_listing_id_from_url(
@@ -468,27 +476,29 @@ def record_completion(
     )
 
     mark_database_copied(
-        listing_id,
+        completion_key or listing_id,
         destination_id or None,
         str(listing.get("title", "")),
     )
 
-    mark_local_copied(
-        listing_id,
-        destination_url,
-    )
+    if record_local:
+        mark_local_copied(
+            listing_id,
+            destination_url,
+        )
 
 
-def process_destination_listing(
+def _process_destination_payload(
     page: Page,
-    listing_file: Path,
+    listing: dict[str, Any],
     destination_urls: list[str],
     *,
     publish: bool,
+    completion_key: str,
+    record_local: bool,
 ) -> str:
     from uploader.publisher import PublishUnverifiedException
 
-    listing = load_listing(listing_file)
     listing_id = str(
         listing.get("listing_id", "")
     )
@@ -498,7 +508,7 @@ def process_destination_listing(
             "Saved listing has no listing_id."
         )
 
-    if listing_already_copied(listing_id):
+    if listing_already_copied(completion_key):
         print("Already copied according to the database.")
         return "already_recorded"
 
@@ -518,6 +528,8 @@ def process_destination_listing(
         record_completion(
             listing,
             existing_url,
+            completion_key=completion_key,
+            record_local=record_local,
         )
 
         # Update cache with confirmed duplicate
@@ -565,6 +577,8 @@ def process_destination_listing(
     record_completion(
         listing,
         destination_url,
+        completion_key=completion_key,
+        record_local=record_local,
     )
 
     add_destination_url(
@@ -582,6 +596,75 @@ def process_destination_listing(
     print("Published destination:", destination_url)
 
     return "uploaded"
+
+
+def process_destination_listing(
+    page: Page,
+    listing_file: Path,
+    destination_urls: list[str],
+    *,
+    publish: bool,
+    size_mode: str = SIZE_MODE_COMBINED,
+) -> str:
+    """Process one source listing using the selected multi-size strategy."""
+    mode = validate_size_mode(size_mode)
+    listing = load_listing(listing_file)
+    listing_id = str(listing.get("listing_id", "")).strip()
+    if not listing_id:
+        raise RuntimeError("Saved listing has no listing_id.")
+    if listing_already_copied(listing_id):
+        print("Already copied according to the database.")
+        return "already_recorded"
+
+    variants = build_size_variants(listing, mode)
+    if len(variants) == 1:
+        return _process_destination_payload(
+            page,
+            variants[0],
+            destination_urls,
+            publish=publish,
+            completion_key=listing_id,
+            record_local=True,
+        )
+
+    print(
+        f"Separate-size mode: processing {len(variants)} verified listing variants."
+    )
+    results: list[str] = []
+    for index, variant in enumerate(variants, 1):
+        print(
+            f"\nSIZE VARIANT {index}/{len(variants)}: {variant['size']}"
+        )
+        result = _process_destination_payload(
+            page,
+            variant,
+            destination_urls,
+            publish=publish,
+            completion_key=str(variant["variant_key"]),
+            record_local=False,
+        )
+        results.append(result)
+        if result == "publish_unverified":
+            print(
+                "Separate-size processing stopped after ambiguous publish verification."
+            )
+            return result
+
+    if not publish:
+        return "would_upload"
+
+    mark_database_copied(
+        listing_id,
+        None,
+        str(listing.get("title", "")),
+    )
+    mark_local_copied(listing_id)
+    print("All size variants verified; source listing marked copied.")
+    if "uploaded" in results:
+        return "uploaded"
+    if "already_exists" in results:
+        return "already_exists"
+    return "already_recorded"
 
 
 def print_progress(
@@ -650,6 +733,7 @@ def run_pipeline(
     discovery_file: Path,
     retries: int,
     retry_delay: float,
+    size_mode: str = SIZE_MODE_COMBINED,
 ) -> None:
     if count < 1:
         raise ValueError(
@@ -660,6 +744,8 @@ def run_pipeline(
         raise ValueError(
             "Retries must be at least 1."
         )
+
+    size_mode = validate_size_mode(size_mode)
 
     configure_playwright_browsers()
     ensure_runtime_directories()
@@ -895,6 +981,7 @@ def run_pipeline(
                                 listing_file,
                                 destination_urls,
                                 publish=publish,
+                                size_mode=size_mode,
                             )
                         ),
                         attempts=retries,
@@ -1088,6 +1175,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    parser.add_argument(
+        "--size-mode",
+        choices=("combined", "separate"),
+        default="combined",
+        help=(
+            "Publish multi-size sources as one combined listing or one "
+            "separate listing per size."
+        ),
+    )
+
     return parser
 
 
@@ -1103,6 +1200,7 @@ def main() -> None:
         discovery_file=args.discovery_file,
         retries=args.retries,
         retry_delay=args.retry_delay,
+        size_mode=args.size_mode,
     )
 
 

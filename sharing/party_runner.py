@@ -14,12 +14,14 @@ from scraper.availability import AvailabilityStatus, verify_listing_availability
 from scraper.listing_scraper import scrape_listing
 from sharing.share_config import ShareConfig
 from sharing.share_engine import PoshmarkShareEngine, ShareableListing
-from sharing.share_progress import ShareError, ShareErrorType, ShareResult
-from sharing.share_runner import listing_id_from_url
+from sharing.share_progress import ShareError, ShareErrorType, ShareProgress, ShareResult
+from sharing.share_runner import collect_shareable_listings, listing_id_from_url
 from uploader.category import split_category
 
 
 CLOSET_URL = "https://poshmark.com/closet/dveshop"
+MAX_AUTOMATIC_PARTY_SHARES = 50
+MAX_PARTY_CANDIDATES_TO_SCAN = 1000
 
 
 def _failed(message: str, listing_id: str = "") -> ShareResult:
@@ -134,6 +136,122 @@ def run_party_candidate(
             if engine_callback is not None:
                 engine_callback(engine)
             return engine.share_listing_to_party(listing, party, retry=False)
+        finally:
+            context.close()
+            browser.close()
+
+
+def run_live_party_batch(
+    max_shares: int,
+    *,
+    delay_seconds: float = 5.0,
+    perform_share: bool = False,
+    expected_party_name: str | None = None,
+    progress_callback: Callable[[ShareProgress], None] | None = None,
+    engine_callback: Callable[[PoshmarkShareEngine], None] | None = None,
+) -> ShareResult:
+    """Preview or share a finite batch of strictly eligible live-party listings."""
+    if max_shares < 1 or max_shares > MAX_AUTOMATIC_PARTY_SHARES:
+        return _failed(
+            f"Automatic party share count must be 1-{MAX_AUTOMATIC_PARTY_SHARES}"
+        )
+    if delay_seconds < 0:
+        return _failed("Party share delay cannot be negative")
+    if not DESTINATION_STATE_FILE.exists():
+        return _failed(f"{DESTINATION_STATE_FILE.name} was not found")
+
+    with sync_playwright() as playwright:
+        browser, context, page = open_logged_in_browser(
+            playwright,
+            state_file=DESTINATION_STATE_FILE,
+        )
+        try:
+            manager = PartyManager()
+            live_parties = [
+                party for party in manager.discover_parties(page) if party.is_live
+            ]
+            if len(live_parties) != 1:
+                return _failed(
+                    "Expected exactly one live Posh Party; "
+                    f"found {len(live_parties)}"
+                )
+            party = live_parties[0]
+            if expected_party_name and party.name != expected_party_name:
+                return _failed(
+                    "The live party changed after preview; run a fresh preview"
+                )
+            manager.load_guidelines(page, party)
+            if party.guidelines is None:
+                return _failed("Live party guidelines are unavailable")
+
+            active_listings = collect_shareable_listings(
+                page,
+                CLOSET_URL,
+                MAX_PARTY_CANDIDATES_TO_SCAN,
+            )
+            eligible: list[ShareableListing] = []
+            for listing in active_listings:
+                page.goto(listing.url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(1000)
+                availability = verify_listing_availability(page)
+                if not availability.available:
+                    continue
+                data = scrape_listing(page, listing.url, download_images=False)
+                raw_category = data.get("category", "") or ""
+                try:
+                    department, category, subcategory = split_category(raw_category)
+                except RuntimeError:
+                    department, category, subcategory = "", raw_category, ""
+                eligibility = is_listing_eligible_for_party(
+                    {
+                        "availability": AvailabilityStatus.AVAILABLE,
+                        "brand": data.get("brand", ""),
+                        "department": department or "",
+                        "category": category or "",
+                        "subcategory": subcategory or "",
+                        "size": data.get("size", ""),
+                    },
+                    party,
+                )
+                if eligibility.status != PartyEligibilityStatus.ELIGIBLE:
+                    continue
+                eligible.append(ShareableListing(
+                    listing_id=listing.listing_id,
+                    url=listing.url,
+                    title=data.get("title", listing.title),
+                    available=True,
+                    active=True,
+                    party_eligible=True,
+                    eligibility_reason=eligibility.reason,
+                ))
+                if len(eligible) >= max_shares:
+                    break
+
+            if not eligible:
+                return _failed(f"No verified listings are eligible for {party.name}")
+            if not perform_share:
+                return ShareResult(
+                    success=True,
+                    skipped=len(eligible),
+                    message=(
+                        f"Previewed {len(eligible)} verified eligible listing(s) "
+                        f"for {party.name}"
+                    ),
+                    party_id=party.party_id,
+                    party_name=party.name,
+                )
+
+            config = ShareConfig(
+                closet_url=CLOSET_URL,
+                delay_seconds=delay_seconds,
+                share_to_parties=True,
+                share_to_posh_shows=False,
+                party_share_limit=max_shares,
+            )
+            engine = PoshmarkShareEngine(page, config, progress_callback)
+            if engine_callback is not None:
+                engine_callback(engine)
+            return engine.share_batch_to_party(eligible, party)
         finally:
             context.close()
             browser.close()

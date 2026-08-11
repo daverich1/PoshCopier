@@ -12,6 +12,7 @@ from tkinter import messagebox, scrolledtext, simpledialog, ttk
 from typing import Union
 
 from dashboard.activity_log import ActivityLog
+from dashboard.ebay_panel import EbayPanel
 from dashboard.inventory_panel import InventoryPanel
 from dashboard.recovery_panel import RecoveryPanel
 from dashboard.sharing_panel import SharingPanel
@@ -67,6 +68,7 @@ class PoshCopierDashboard:
         self.count_var = tk.StringVar(value="5")
         self.retries_var = tk.StringVar(value="3")
         self.retry_delay_var = tk.StringVar(value="3")
+        self.size_mode_var = tk.StringVar(value="combined")
         self.command_input_var = tk.StringVar(value="")
 
         # Closet sync state
@@ -139,6 +141,10 @@ class PoshCopierDashboard:
             notebook,
             padding=0,
         )
+        ebay_tab = ttk.Frame(
+            notebook,
+            padding=0,
+        )
 
         notebook.add(
             pipeline_tab,
@@ -159,6 +165,10 @@ class PoshCopierDashboard:
         notebook.add(
             sharing_tab,
             text="Sharing",
+        )
+        notebook.add(
+            ebay_tab,
+            text="eBay",
         )
         settings = ttk.LabelFrame(
             pipeline_tab,
@@ -271,6 +281,21 @@ class PoshCopierDashboard:
             sticky="w",
             pady=4,
         )
+
+        ttk.Label(settings, text="Multi-size publishing:").grid(
+            row=2, column=0, sticky="w", padx=(0, 8), pady=4
+        )
+        ttk.Combobox(
+            settings,
+            textvariable=self.size_mode_var,
+            values=("combined", "separate"),
+            state="readonly",
+            width=14,
+        ).grid(row=2, column=1, sticky="w", pady=4)
+        ttk.Label(
+            settings,
+            text="Combined = one listing; Separate = one verified listing per size.",
+        ).grid(row=2, column=2, columnspan=2, sticky="w", padx=(16, 0), pady=4)
 
         self.controls = ControlsPanel(
             pipeline_tab,
@@ -544,6 +569,14 @@ class PoshCopierDashboard:
             fill="both",
             expand=True,
         )
+
+        self.ebay_panel = EbayPanel(
+            ebay_tab
+        )
+        self.ebay_panel.pack(
+            fill="both",
+            expand=True,
+        )
         
     def validate_settings(
         self,
@@ -604,6 +637,8 @@ class PoshCopierDashboard:
             str(retries),
             "--retry-delay",
             str(retry_delay),
+            "--size-mode",
+            self.size_mode_var.get(),
         ]
 
         if self.mode_var.get() == "publish":
@@ -652,6 +687,7 @@ class PoshCopierDashboard:
                 (
                     f"This will attempt to publish up to "
                     f"{count} listing(s).\n\nContinue?"
+                    f"\n\nMulti-size mode: {self.size_mode_var.get()}"
                 ),
             )
 

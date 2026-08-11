@@ -21,6 +21,34 @@ from party.party_models import (
 )
 
 
+PARTY_BRAND_ALIASES = {
+    "hoka one one": "hoka",
+}
+
+
+def normalize_party_brand(value: str | None) -> str:
+    """Normalize only confirmed Poshmark party/listing brand aliases."""
+    normalized = normalize_text(value)
+    return PARTY_BRAND_ALIASES.get(normalized, normalized)
+
+
+def party_brand_matches(listing_brand: str | None, allowed_brand: str | None) -> bool:
+    """Match an allowed brand as an exact, whole-word phrase in a listing brand."""
+    listing = normalize_party_brand(listing_brand)
+    allowed = normalize_party_brand(allowed_brand)
+    if not listing or not allowed:
+        return False
+    if listing == allowed:
+        return True
+    listing_words = listing.split()
+    allowed_words = allowed.split()
+    phrase_length = len(allowed_words)
+    return any(
+        listing_words[index:index + phrase_length] == allowed_words
+        for index in range(len(listing_words) - phrase_length + 1)
+    )
+
+
 def classify_party_type(guidelines: PartyGuidelines) -> PartyType:
     """
     Classify party type based on guidelines.
@@ -152,7 +180,7 @@ def is_listing_eligible_for_party(
     # STEP 4: BRAND CHECK
     # ========================================================================
     
-    brands_allowed = [normalize_text(b) for b in guidelines.brands_allowed]
+    brands_allowed = [normalize_party_brand(b) for b in guidelines.brands_allowed]
     brands_unrestricted = "all" in brands_allowed
     
     # FIXED: Empty means field absent, return UNKNOWN
@@ -171,9 +199,10 @@ def is_listing_eligible_for_party(
                 reason="Party restricts brands but listing brand is unknown",
             )
         
-        listing_brand_normalized = normalize_text(listing_brand)
-        
-        if listing_brand_normalized not in brands_allowed:
+        if not any(
+            party_brand_matches(listing_brand, allowed_brand)
+            for allowed_brand in guidelines.brands_allowed
+        ):
             return PartyEligibilityResult(
                 status=PartyEligibilityStatus.INELIGIBLE,
                 reason=f"Listing brand '{listing_brand}' is not in allowed brands: {', '.join(guidelines.brands_allowed)}",

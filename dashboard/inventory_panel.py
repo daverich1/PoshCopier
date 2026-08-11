@@ -12,6 +12,7 @@ from inventory.inventory_manager import InventoryManager
 from inventory.thumbnail_cache import ThumbnailCache
 from inventory.upload_queue import UploadQueueManager
 from dashboard.listing_editor import ListingEditor
+from dashboard.ebay_draft_dialog import EbayDraftDialog
 from dashboard.upload_dialog import UploadDialog
 
 
@@ -500,6 +501,17 @@ class InventoryPanel(ttk.LabelFrame):
             side="left",
             padx=(8, 0),
         )
+
+        self.ebay_draft_button = ttk.Button(
+            actions,
+            text="Review eBay Draft",
+            command=self.review_selected_ebay_draft,
+            state="disabled",
+        )
+        self.ebay_draft_button.pack(
+            side="left",
+            padx=(8, 0),
+        )
     def _add_detail_row(
         self,
         parent: ttk.Frame,
@@ -752,6 +764,7 @@ class InventoryPanel(ttk.LabelFrame):
         self.open_folder_button.configure(state="normal")
         self.open_json_button.configure(state="normal")
         self.edit_button.configure(state="normal")
+        self.ebay_draft_button.configure(state="normal")
         upload_state = "normal" if item.ready_for_upload else "disabled"
         self.dry_run_button.configure(state=upload_state)
         self.upload_button.configure(state=upload_state)
@@ -797,6 +810,19 @@ class InventoryPanel(ttk.LabelFrame):
         self.upload_button.configure(
             state=state
         )
+        self.ebay_draft_button.configure(
+            state=state
+        )
+
+    def review_selected_ebay_draft(self) -> None:
+        item = self.selected_item
+        if item is None:
+            messagebox.showwarning(
+                "No Listing Selected",
+                "Select one listing to review for eBay.",
+            )
+            return
+        EbayDraftDialog(self, item)
 
     def open_selected_folder(self) -> None:
         item = self.selected_item
@@ -1109,6 +1135,7 @@ class InventoryPanel(ttk.LabelFrame):
                 self.open_folder_button.configure(state="normal")
                 self.open_json_button.configure(state="normal")
                 self.edit_button.configure(state="normal")
+                self.ebay_draft_button.configure(state="normal")
                 
                 # Upload buttons only enabled if ready
                 upload_state = "normal" if item.ready_for_upload else "disabled"
@@ -1126,6 +1153,7 @@ class InventoryPanel(ttk.LabelFrame):
         self.edit_button.configure(state="disabled")
         self.dry_run_button.configure(state="disabled")
         self.upload_button.configure(state="disabled")
+        self.ebay_draft_button.configure(state="disabled")
 
     def _show_multi_selection(self, count: int) -> None:
         """Show multi-selection summary in detail panel."""
@@ -1144,5 +1172,4 @@ class InventoryPanel(ttk.LabelFrame):
         self.category_var.set("—")
         self.health_var.set("—")
         self.status_var.set("—")
-
 

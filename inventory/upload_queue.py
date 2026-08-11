@@ -612,7 +612,7 @@ class UploadQueueManager:
             "skipped": counts["skipped"],
             "cancelled": counts["cancelled"],
             "publish_unverified": counts["publish_unverified"],
-            "completed": completed,
+            "completed": terminal_completed,
             "remaining": remaining,
             "percent": percent,
         }

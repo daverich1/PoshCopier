@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+MAX_FOLLOWER_SHARES_PER_RUN = 1000
+
+
 @dataclass
 class ShareConfig:
     """
@@ -52,6 +55,13 @@ class ShareConfig:
         
         if self.max_shares is not None and self.max_shares < 1:
             raise ValueError("max_shares must be at least 1 or None")
+        if (
+            self.max_shares is not None
+            and self.max_shares > MAX_FOLLOWER_SHARES_PER_RUN
+        ):
+            raise ValueError(
+                f"max_shares cannot exceed {MAX_FOLLOWER_SHARES_PER_RUN}"
+            )
         
         if self.stop_on_failures < 1:
             raise ValueError("stop_on_failures must be at least 1")

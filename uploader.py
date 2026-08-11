@@ -196,14 +196,17 @@ def fill_listing_form(
         listing.get("category", "")
     ).strip()
 
-    # Poshmark Home and WomenBags categories do not expose a Size control.
+    # Poshmark Home, WomenBags, and WomenSkincare categories do not expose a
+    # Size control.
     # Keep size handling strict everywhere else.
     if (
         category_value.casefold().startswith("home")
         or category_value.casefold().startswith("womenbags")
+        or category_value.casefold().startswith("womenskincare")
     ):
         print(
-            "Size not applicable for Home or WomenBags category; "
+            "Size not applicable for Home, WomenBags, or WomenSkincare "
+            "category; "
             "skipping size selection."
         )
     else:

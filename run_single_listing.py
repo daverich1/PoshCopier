@@ -32,6 +32,7 @@ from uploader.duplicate_detector import (
     collect_destination_listing_urls,
 )
 from uploader.listing_loader import load_listing
+from uploader.size_strategy import SIZE_MODE_COMBINED, validate_size_mode
 
 
 def run_single_listing(
@@ -40,6 +41,7 @@ def run_single_listing(
     publish: bool,
     retries: int,
     retry_delay: float,
+    size_mode: str = SIZE_MODE_COMBINED,
 ) -> None:
     listing_file = listing_file.resolve()
 
@@ -52,6 +54,8 @@ def run_single_listing(
         raise ValueError(
             "Retries must be at least 1."
         )
+
+    size_mode = validate_size_mode(size_mode)
 
     configure_playwright_browsers()
     ensure_runtime_directories()
@@ -186,6 +190,7 @@ def run_single_listing(
                         listing_file,
                         destination_urls,
                         publish=publish,
+                        size_mode=size_mode,
                     ),
                     attempts=retries,
                     delay_seconds=retry_delay,
@@ -307,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=3.0,
     )
 
+    parser.add_argument(
+        "--size-mode",
+        choices=("combined", "separate"),
+        default="combined",
+    )
+
     return parser
 
 
@@ -321,6 +332,7 @@ def main() -> None:
         publish=args.publish,
         retries=args.retries,
         retry_delay=args.retry_delay,
+        size_mode=args.size_mode,
     )
 
 

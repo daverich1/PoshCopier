@@ -34,6 +34,7 @@ class UploadDialog(tk.Toplevel):
         self.output_queue: queue.Queue[str] = queue.Queue()
 
         self.mode_var = tk.StringVar(value="dry_run")
+        self.size_mode_var = tk.StringVar(value="combined")
         self.status_var = tk.StringVar(value="Ready")
 
         self.title(f"Upload Listing - {item.title or item.listing_id}")
@@ -81,6 +82,17 @@ class UploadDialog(tk.Toplevel):
             variable=self.mode_var,
             value="publish",
         ).pack(side="left", padx=(16, 0))
+
+        ttk.Label(mode_frame, text="Multi-size publishing:").pack(
+            side="left", padx=(28, 8)
+        )
+        ttk.Combobox(
+            mode_frame,
+            textvariable=self.size_mode_var,
+            values=("combined", "separate"),
+            state="readonly",
+            width=12,
+        ).pack(side="left")
 
         controls = ttk.Frame(main)
         controls.grid(row=3, column=0, sticky="ew", pady=12)
@@ -138,6 +150,8 @@ class UploadDialog(tk.Toplevel):
             "3",
             "--retry-delay",
             "3.0",
+            "--size-mode",
+            self.size_mode_var.get(),
         ]
 
         if self.mode_var.get() == "publish":
@@ -164,7 +178,8 @@ class UploadDialog(tk.Toplevel):
             confirmed = messagebox.askyesno(
                 "Confirm Live Publish",
                 "This will attempt to publish the selected listing to the "
-                "destination closet.\n\nContinue?",
+                "destination closet.\n\n"
+                f"Multi-size mode: {self.size_mode_var.get()}\n\nContinue?",
                 parent=self,
             )
             if not confirmed:
